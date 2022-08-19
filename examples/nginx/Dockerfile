@@ -1,2 +1,2 @@
-from koderover.tencentcloudcr.com/koderover-demo/nginx
-add ./index.html /usr/share/nginx/html
+from nginx:alpine
+RUN echo `date` > /usr/share/nginx/html/index.html
