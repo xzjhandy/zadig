@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -58,6 +59,14 @@ type serviceInfo struct {
 	Name           string    `json:"name"`
 	ModifiedBy     string    `json:"modifiedBy"`
 	LastUpdateTime time.Time `json:"-"`
+}
+
+type ServiceMatchedDeploymentContainers struct {
+	ServiceName string `json:"service_name"`
+	Deployment  struct {
+		DeploymentName string   `json:"deployments_name"`
+		ContainerNames []string `json:"container_names"`
+	} `json:"deployment"`
 }
 
 func ListKubeEvents(env string, productName string, name string, rtype string, log *zap.SugaredLogger) ([]*resource.Event, error) {
@@ -148,20 +157,27 @@ func ListAvailableNamespaces(clusterID, listType string, log *zap.SugaredLogger)
 		}
 		filterK8sNamespaces.Insert(nsList...)
 	}
-	for _, namespace := range namespaces {
+
+	filter := func(namespace *corev1.Namespace) bool {
+		if listType == setting.ListNamespaceTypeALL {
+			return true
+		}
 		if value, IsExist := namespace.Labels[setting.EnvCreatedBy]; IsExist {
 			if value == setting.EnvCreator {
-				continue
+				return false
 			}
 		}
-
 		if filterK8sNamespaces.Has(namespace.Name) {
-			continue
+			return false
 		}
-
-		resp = append(resp, wrapper.Namespace(namespace).Resource())
+		return true
 	}
 
+	for _, namespace := range namespaces {
+		if filter(namespace) {
+			resp = append(resp, wrapper.Namespace(namespace).Resource())
+		}
+	}
 	return resp, nil
 }
 
@@ -475,4 +491,214 @@ func nodeLabel(node *corev1.Node) []string {
 		labels = append(labels, fmt.Sprintf("%s:%s", key, value))
 	}
 	return labels
+}
+
+func ListNamespace(clusterID string, log *zap.SugaredLogger) ([]string, error) {
+	resp := make([]string, 0)
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("ListNamespaces clusterID:%s err:%v", clusterID, err)
+		return resp, err
+	}
+	namespaces, err := getter.ListNamespaces(kubeClient)
+	if err != nil {
+		log.Errorf("ListNamespaces err:%v", err)
+		if apierrors.IsForbidden(err) {
+			return resp, err
+		}
+		return resp, err
+	}
+	for _, namespace := range namespaces {
+		resp = append(resp, namespace.Name)
+	}
+	return resp, nil
+}
+
+func ListDeploymentNames(clusterID, namespace string, log *zap.SugaredLogger) ([]string, error) {
+	resp := make([]string, 0)
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("ListDeployment clusterID:%s err:%v", clusterID, err)
+		return resp, err
+	}
+	deployments, err := getter.ListDeployments(namespace, labels.Everything(), kubeClient)
+	if err != nil {
+		log.Errorf("ListDeployment err:%v", err)
+		if apierrors.IsForbidden(err) {
+			return resp, err
+		}
+		return resp, err
+	}
+	for _, deployment := range deployments {
+		resp = append(resp, deployment.Name)
+	}
+	return resp, nil
+}
+
+type WorkloadInfo struct {
+	WorkloadType  string `json:"workload_type"`
+	WorkloadName  string `json:"workload_name"`
+	ContainerName string `json:"container_name"`
+}
+
+// for now,only support deployment
+func ListWorkloadsInfo(clusterID, namespace string, log *zap.SugaredLogger) ([]*WorkloadInfo, error) {
+	resp := make([]*WorkloadInfo, 0)
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("ListDeployments clusterID:%s err:%v", clusterID, err)
+		return resp, err
+	}
+	deployments, err := getter.ListDeployments(namespace, labels.Everything(), kubeClient)
+	if err != nil {
+		log.Errorf("ListDeployments err:%v", err)
+		if apierrors.IsForbidden(err) {
+			return resp, err
+		}
+		return resp, err
+	}
+	for _, deployment := range deployments {
+		for _, container := range deployment.Spec.Template.Spec.Containers {
+			resp = append(resp, &WorkloadInfo{
+				WorkloadType:  setting.Deployment,
+				WorkloadName:  deployment.Name,
+				ContainerName: container.Name,
+			})
+		}
+	}
+	return resp, nil
+}
+
+func ListCustomWorkload(clusterID, namespace string, log *zap.SugaredLogger) ([]string, error) {
+	resp := make([]string, 0)
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("ListCustomWorkload clusterID:%s err:%v", clusterID, err)
+		return resp, err
+	}
+	deployments, err := getter.ListDeployments(namespace, labels.Everything(), kubeClient)
+	if err != nil {
+		log.Errorf("ListDeployments err:%v", err)
+		if apierrors.IsForbidden(err) {
+			return resp, err
+		}
+		return resp, err
+	}
+	for _, deployment := range deployments {
+		for _, container := range deployment.Spec.Template.Spec.Containers {
+			resp = append(resp, strings.Join([]string{setting.Deployment, deployment.Name, container.Name}, "/"))
+		}
+	}
+	statefulsets, err := getter.ListStatefulSets(namespace, labels.Everything(), kubeClient)
+	if err != nil {
+		log.Errorf("ListStatefulSets err:%v", err)
+		if apierrors.IsForbidden(err) {
+			return resp, err
+		}
+		return resp, err
+	}
+	for _, statefulset := range statefulsets {
+		for _, container := range statefulset.Spec.Template.Spec.Containers {
+			resp = append(resp, strings.Join([]string{setting.StatefulSet, statefulset.Name, container.Name}, "/"))
+		}
+	}
+	return resp, nil
+}
+
+// list serivce and matched deployment containers for canary and blue-green deployment.
+func ListCanaryDeploymentServiceInfo(clusterID, namespace string, log *zap.SugaredLogger) ([]*ServiceMatchedDeploymentContainers, error) {
+	resp := []*ServiceMatchedDeploymentContainers{}
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("get kubeclient error: %v, clusterID: %s", err, clusterID)
+		return resp, err
+	}
+	services, err := getter.ListServices(namespace, labels.Everything(), kubeClient)
+	if err != nil {
+		log.Errorf("list services error: %v", err)
+		return resp, err
+	}
+	for _, service := range services {
+		deploymentContainers := &ServiceMatchedDeploymentContainers{
+			ServiceName: service.Name,
+		}
+		selector := labels.SelectorFromSet(service.Spec.Selector)
+		deployments, err := getter.ListDeployments(namespace, selector, kubeClient)
+		if err != nil {
+			log.Errorf("ListDeployments err:%v", err)
+			return resp, err
+		}
+		// one service should only match one deployment
+		if len(deployments) != 1 {
+			continue
+		}
+		deployment := deployments[0]
+		deploymentContainers.Deployment.DeploymentName = deployment.Name
+		for _, container := range deployment.Spec.Template.Spec.Containers {
+			deploymentContainers.Deployment.ContainerNames = append(deploymentContainers.Deployment.ContainerNames, container.Name)
+		}
+		resp = append(resp, deploymentContainers)
+	}
+	return resp, nil
+}
+
+type K8sResource struct {
+	ResourceName    string `json:"resource_name"`
+	ResourceKind    string `json:"resource_kind"`
+	ResourceGroup   string `json:"resource_group"`
+	ResourceVersion string `json:"resource_version"`
+}
+
+func ListAllK8sResourcesInNamespace(clusterID, namespace string, log *zap.SugaredLogger) ([]*K8sResource, error) {
+	resp := []*K8sResource{}
+	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("get kubeclient error: %v, clusterID: %s", err, clusterID)
+		return resp, err
+	}
+	discoveryCli, err := kubeclient.GetDiscoveryClient(config.HubServerAddress(), clusterID)
+	if err != nil {
+		log.Errorf("get discovery client clusterID:%s error:%v", clusterID, err)
+		return resp, err
+	}
+	discoveryCli.ServerGroups()
+	apiResources, err := discoveryCli.ServerPreferredNamespacedResources()
+	if err != nil {
+		log.Errorf("clusterID: %s, list api resources error:%v", clusterID, err)
+		return resp, err
+	}
+	for _, apiGroup := range apiResources {
+		for _, apiResource := range apiGroup.APIResources {
+			version := ""
+			group := ""
+			groupVersions := strings.Split(apiGroup.GroupVersion, "/")
+			if len(groupVersions) == 2 {
+				group = groupVersions[0]
+				version = groupVersions[1]
+			} else if len(groupVersions) == 1 {
+				version = groupVersions[0]
+			} else {
+				continue
+			}
+			gvk := schema.GroupVersionKind{
+				Group:   group,
+				Version: version,
+				Kind:    apiResource.Kind,
+			}
+			resources, err := getter.ListUnstructuredResourceInCache(namespace, labels.Everything(), nil, gvk, kubeClient)
+			if err != nil {
+				log.Warnf("list resources %s %s error:%v", apiGroup.GroupVersion, apiResource.Kind, err)
+				continue
+			}
+			for _, resource := range resources {
+				resp = append(resp, &K8sResource{
+					ResourceName:    resource.GetName(),
+					ResourceKind:    resource.GetKind(),
+					ResourceGroup:   group,
+					ResourceVersion: version,
+				})
+			}
+		}
+	}
+	return resp, nil
 }

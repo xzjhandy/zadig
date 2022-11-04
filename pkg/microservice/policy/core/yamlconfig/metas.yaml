@@ -64,7 +64,11 @@ metas:
           - method: GET
             endpoint: /api/aslan/workflow/v2/tasks/workflow/workflow/?*/taskId/?*
           - method: GET
+            endpoint: /api/aslan/workflow/v4/workflowtask/workflow/?*/taskId/?*/job/?*
+          - method: GET
             endpoint: /api/aslan/testing/workspace/workflow/?*/taskId/?*
+          - method: GET
+            endpoint: /api/aslan/testing/workspace/workflowv4/?*/taskId/?*/job/?*
           - method: GET
             endpoint: /api/aslan/cluster/clusters
       - action: edit_test
@@ -135,8 +139,8 @@ metas:
             endpoint: /api/aslan/service/services/?*/pm
           - method: GET
             endpoint: /api/aslan/template/yaml
-          - method: GET
-            endpoint: /api/aslan/service/helm/?*/?*/fileContent
+          - method: PUT
+            endpoint: /api/aslan/service/helm/?*/file
       - action: edit_service
         alias: 编辑
         description: ''
@@ -380,6 +384,8 @@ metas:
           - method: PUT
             endpoint: /api/aslan/template/yaml/?*
           - method: PUT
+            endpoint: /api/aslan/template/yaml/?*/variable
+          - method: PUT
             endpoint: /api/aslan/template/charts/?*
           - method: POST
             endpoint: api/aslan/template/charts/?*/reference
@@ -391,6 +397,8 @@ metas:
             endpoint: /api/aslan/template/dockerfile/?*
           - method: PUT
             endpoint: /api/aslan/template/build/?*
+          - method: POST
+            endpoint: /api/aslan/template/yaml/validateVariable
       - action: delete_template
         alias: 删除
         description: 删除
@@ -457,6 +465,8 @@ metas:
           - method: GET
             endpoint: /api/aslan/testing/itreport/workflow/?*/id/?*/names/?*/service/?*
           - method: GET
+            endpoint: /api/aslan/testing/itreport/workflowv4/?*/id/?*/job/?*
+          - method: GET
             endpoint: /api/directory/workflowTask
           - method: GET
             endpoint: /api/aslan/workflow/v3
@@ -486,9 +496,13 @@ metas:
           - method: GET
             endpoint: /api/aslan/workflow/v4/webhook
           - method: GET
-            endpoint: /api/aslan/logs/log/v4/workflow/?*/tasks/?*/jobs/?*
+            endpoint: /api/aslan/workflow/v4/cron/preset
           - method: GET
-            endpoint: /api/aslan/logs/sse/v4/workflow/?*/tasks/?*/jobs/?*
+            endpoint: /api/aslan/workflow/v4/cron
+          - method: GET
+            endpoint: /api/aslan/workflow/v4/workflowtask/workflow/?*/taskId/?*/job/?*
+          - method: GET
+            endpoint: /api/aslan/testing/workspace/workflowv4/?*/taskId/?*/job/?*
       - action: edit_workflow
         alias: 编辑
         description: ''
@@ -515,6 +529,12 @@ metas:
             endpoint: /api/aslan/workflow/v4/webhook/?*
           - method: DELETE
             endpoint: /api/aslan/workflow/v4/webhook/?*/trigger/?*
+          - method: POST
+            endpoint: /api/aslan/workflow/v4/cron/?*
+          - method: PUT
+            endpoint: /api/aslan/workflow/v4/cron
+          - method: DELETE
+            endpoint: /api/aslan/workflow/v4/cron/?*/trigger/?*
       - action: create_workflow
         alias: 新建
         description: ''
@@ -524,7 +544,7 @@ metas:
           - method: POST
             endpoint: api/aslan/workflow/workflow
           - method: PUT
-            endpoint: /api/aslan/workflow/workflow/old/?*/new/?*
+            endpoint: /api/aslan/workflow/workflow/old/?*/new/?*/?*
           - method: POST
             endpoint: /api/directory/workflowTask/create
           - method: GET

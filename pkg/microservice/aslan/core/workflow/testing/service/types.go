@@ -24,27 +24,31 @@ import (
 const DefaultScanningTimeout = 60 * 60
 
 type Scanning struct {
-	ID          string              `json:"id"`
-	Name        string              `json:"name"`
-	ProjectName string              `json:"project_name"`
-	Description string              `json:"description"`
-	ScannerType string              `json:"scanner_type"`
-	ImageID     string              `json:"image_id"`
-	SonarID     string              `json:"sonar_id"`
-	Repos       []*types.Repository `json:"repos"`
+	ID          string               `json:"id"`
+	Name        string               `json:"name"`
+	ProjectName string               `json:"project_name"`
+	Description string               `json:"description"`
+	ScannerType string               `json:"scanner_type"`
+	ImageID     string               `json:"image_id"`
+	SonarID     string               `json:"sonar_id"`
+	Installs    []*commonmodels.Item `json:"installs"`
+	Repos       []*types.Repository  `json:"repos"`
+	PreScript   string               `json:"pre_script"`
 	// Parameter is for sonarQube type only
 	Parameter string `json:"parameter"`
 	// Script is for other type only
-	Script          string                         `json:"script"`
-	AdvancedSetting *types.ScanningAdvancedSetting `json:"advanced_settings"`
+	Script           string                         `json:"script"`
+	AdvancedSetting  *types.ScanningAdvancedSetting `json:"advanced_settings"`
+	CheckQualityGate bool                           `json:"check_quality_gate"`
 }
 
 type ListScanningRespItem struct {
-	ID         string             `json:"id"`
-	Name       string             `json:"name"`
-	Statistics *ScanningStatistic `json:"statistics"`
-	CreatedAt  int64              `json:"created_at"`
-	UpdatedAt  int64              `json:"updated_at"`
+	ID         string              `json:"id"`
+	Name       string              `json:"name"`
+	Statistics *ScanningStatistic  `json:"statistics"`
+	CreatedAt  int64               `json:"created_at"`
+	UpdatedAt  int64               `json:"updated_at"`
+	Repos      []*types.Repository `json:"repos"`
 }
 
 type ScanningRepoInfo struct {
@@ -54,6 +58,7 @@ type ScanningRepoInfo struct {
 	RepoNamespace string `json:"repo_namespace"`
 	RepoName      string `json:"repo_name"`
 	PR            int    `json:"pr"`
+	PRs           []int  `json:"prs"`
 	Branch        string `json:"branch"`
 	Tag           string `json:"tag"`
 }
@@ -94,16 +99,19 @@ type ScanningTaskDetail struct {
 func ConvertToDBScanningModule(args *Scanning) *commonmodels.Scanning {
 	// ID is omitted since they are of different type and there will be no use of it
 	return &commonmodels.Scanning{
-		Name:            args.Name,
-		ProjectName:     args.ProjectName,
-		Description:     args.Description,
-		ScannerType:     args.ScannerType,
-		ImageID:         args.ImageID,
-		SonarID:         args.SonarID,
-		Repos:           args.Repos,
-		Parameter:       args.Parameter,
-		Script:          args.Script,
-		AdvancedSetting: args.AdvancedSetting,
+		Name:             args.Name,
+		ProjectName:      args.ProjectName,
+		Description:      args.Description,
+		ScannerType:      args.ScannerType,
+		ImageID:          args.ImageID,
+		SonarID:          args.SonarID,
+		Repos:            args.Repos,
+		Parameter:        args.Parameter,
+		Script:           args.Script,
+		AdvancedSetting:  args.AdvancedSetting,
+		Installs:         args.Installs,
+		PreScript:        args.PreScript,
+		CheckQualityGate: args.CheckQualityGate,
 	}
 }
 
@@ -112,16 +120,19 @@ func ConvertDBScanningModule(scanning *commonmodels.Scanning) *Scanning {
 		repo.RepoNamespace = repo.GetRepoNamespace()
 	}
 	return &Scanning{
-		ID:              scanning.ID.Hex(),
-		Name:            scanning.Name,
-		ProjectName:     scanning.ProjectName,
-		Description:     scanning.Description,
-		ScannerType:     scanning.ScannerType,
-		ImageID:         scanning.ImageID,
-		SonarID:         scanning.SonarID,
-		Repos:           scanning.Repos,
-		Parameter:       scanning.Parameter,
-		Script:          scanning.Script,
-		AdvancedSetting: scanning.AdvancedSetting,
+		ID:               scanning.ID.Hex(),
+		Name:             scanning.Name,
+		ProjectName:      scanning.ProjectName,
+		Description:      scanning.Description,
+		ScannerType:      scanning.ScannerType,
+		ImageID:          scanning.ImageID,
+		SonarID:          scanning.SonarID,
+		Repos:            scanning.Repos,
+		Parameter:        scanning.Parameter,
+		Script:           scanning.Script,
+		AdvancedSetting:  scanning.AdvancedSetting,
+		Installs:         scanning.Installs,
+		PreScript:        scanning.PreScript,
+		CheckQualityGate: scanning.CheckQualityGate,
 	}
 }

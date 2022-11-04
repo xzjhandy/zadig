@@ -28,7 +28,10 @@ import (
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/instantmessage"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/scmnotify"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/workflowcontroller/jobcontroller"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/workflowstat"
 	"github.com/koderover/zadig/pkg/tool/log"
 )
 
@@ -57,6 +60,12 @@ func CancelWorkflowTask(userName, workflowName string, taskID int64, logger *zap
 		return err
 	}
 
+	// try to remove task from queue first.
+	q := ConvertTaskToQueue(t)
+	if err := Remove(q); err != nil {
+		logger.Errorf("[%s] remove queue task: %s:%d error: %v", userName, workflowName, taskID, err)
+	}
+
 	if t.Status == config.StatusPassed {
 		logger.Errorf("[%s] task: %s:%d is passed, cannot cancel", userName, workflowName, taskID)
 		return fmt.Errorf("task: %s:%d is passed, cannot cancel", workflowName, taskID)
@@ -78,12 +87,6 @@ func CancelWorkflowTask(userName, workflowName string, taskID int64, logger *zap
 	}
 	if err := scmnotify.NewService().CompleteGitCheckForWorkflowV4(t.WorkflowArgs, t.TaskID, t.Status, logger); err != nil {
 		log.Warnf("Failed to update github check status for custom workflow %s, taskID: %d the error is: %s", t.WorkflowName, t.TaskID, err)
-	}
-
-	q := ConvertTaskToQueue(t)
-	if err := Remove(q); err != nil {
-		logger.Errorf("[%s] remove queue task: %s:%d error: %v", userName, workflowName, taskID, err)
-		return err
 	}
 
 	value, ok := cancelChannelMap.Load(fmt.Sprintf("%s-%d", workflowName, taskID))
@@ -130,7 +133,13 @@ func (c *workflowCtl) Run(ctx context.Context, concurrency int) {
 		GlobalContextSet:  c.setGlobalContext,
 		GlobalContextEach: c.globalContextEach,
 	}
-
+	defer jobcontroller.CleanWorkflowJobs(ctx, c.workflowTask, workflowCtx, c.logger, c.ack)
+	if err := scmnotify.NewService().UpdateWebhookCommentForWorkflowV4(c.workflowTask, c.logger); err != nil {
+		log.Warnf("Failed to update comment for custom workflow %s, taskID: %d the error is: %s", c.workflowTask.WorkflowName, c.workflowTask.TaskID, err)
+	}
+	if err := scmnotify.NewService().UpdateGitCheckForWorkflowV4(c.workflowTask.WorkflowArgs, c.workflowTask.TaskID, c.logger); err != nil {
+		log.Warnf("Failed to update github check status for custom workflow %s, taskID: %d the error is: %s", c.workflowTask.WorkflowName, c.workflowTask.TaskID, err)
+	}
 	RunStages(ctx, c.workflowTask.Stages, workflowCtx, concurrency, c.logger, c.ack)
 	updateworkflowStatus(c.workflowTask)
 }
@@ -201,8 +210,11 @@ func (c *workflowCtl) updateWorkflowTask() {
 		c.logger.Errorf("update workflow task v4 failed,error: %v", err)
 	}
 
-	if c.workflowTask.Status == config.StatusPassed || c.workflowTask.Status == config.StatusFailed || c.workflowTask.Status == config.StatusTimeout || c.workflowTask.Status == config.StatusCancelled || taskInColl.Status == config.StatusReject {
+	if c.workflowTask.Status == config.StatusPassed || c.workflowTask.Status == config.StatusFailed || c.workflowTask.Status == config.StatusTimeout || c.workflowTask.Status == config.StatusCancelled || c.workflowTask.Status == config.StatusReject {
 		c.logger.Infof("%s:%d:%v task done", c.workflowTask.WorkflowName, c.workflowTask.TaskID, c.workflowTask.Status)
+		if err := instantmessage.NewWeChatClient().SendWorkflowTaskNotifications(c.workflowTask); err != nil {
+			c.logger.Errorf("send workflow task notification failed, error: %v", err)
+		}
 		q := ConvertTaskToQueue(c.workflowTask)
 		if err := Remove(q); err != nil {
 			c.logger.Errorf("remove queue task: %s:%d error: %v", c.workflowTask.WorkflowName, c.workflowTask.TaskID, err)
@@ -222,8 +234,11 @@ func (c *workflowCtl) updateWorkflowTask() {
 		if err := scmnotify.NewService().CompleteGitCheckForWorkflowV4(c.workflowTask.WorkflowArgs, c.workflowTask.TaskID, c.workflowTask.Status, c.logger); err != nil {
 			log.Warnf("Failed to update github check status for custom workflow %s, taskID: %d the error is: %s", c.workflowTask.WorkflowName, c.workflowTask.TaskID, err)
 		}
-	}
+		if err := workflowstat.UpdateWorkflowStat(c.workflowTask.WorkflowName, string(config.WorkflowTypeV4), string(c.workflowTask.Status), c.workflowTask.ProjectName, c.workflowTask.EndTime-c.workflowTask.StartTime, c.workflowTask.IsRestart); err != nil {
+			log.Warnf("Failed to update workflow stat for custom workflow %s, taskID: %d the error is: %s", c.workflowTask.WorkflowName, c.workflowTask.TaskID, err)
+		}
 
+	}
 }
 
 func (c *workflowCtl) getGlobalContext(key string) (string, bool) {

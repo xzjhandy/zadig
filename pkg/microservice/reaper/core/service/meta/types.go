@@ -132,11 +132,12 @@ type Context struct {
 	UploadInfo        []*types.ObjectStoragePathDetail `yaml:"upload_info"`
 
 	// scanner used flag
-	ScannerFlag    bool   `yaml:"scanner_flag"`
-	ScannerType    string `yaml:"scanner_type"`
-	SonarParameter string `yaml:"sonar_parameter"`
-	SonarServer    string `yaml:"sonar_server"`
-	SonarLogin     string `yaml:"sonar_login"`
+	ScannerFlag           bool   `yaml:"scanner_flag"`
+	ScannerType           string `yaml:"scanner_type"`
+	SonarParameter        string `yaml:"sonar_parameter"`
+	SonarServer           string `yaml:"sonar_server"`
+	SonarLogin            string `yaml:"sonar_login"`
+	SonarCheckQualityGate bool   `yaml:"sonar_check_quality_gate"`
 }
 
 type ArtifactInfo struct {
@@ -270,6 +271,7 @@ type Repo struct {
 	RemoteName         string         `yaml:"remote_name"`
 	Branch             string         `yaml:"branch"`
 	PR                 int            `yaml:"pr"`
+	PRs                []int          `yaml:"prs"`
 	Tag                string         `yaml:"tag"`
 	CheckoutPath       string         `yaml:"checkout_path"`
 	SubModules         bool           `yaml:"submodules"`
@@ -295,6 +297,15 @@ func (r *Repo) PRRef() string {
 		return r.CheckoutRef
 	}
 	return fmt.Sprintf("refs/pull/%d/head", r.PR)
+}
+
+func (r *Repo) PRRefByPRID(pr int) string {
+	if strings.ToLower(r.Source) == ProviderGitlab || strings.ToLower(r.Source) == ProviderCodehub {
+		return fmt.Sprintf("merge-requests/%d/head", pr)
+	} else if strings.ToLower(r.Source) == ProviderGerrit {
+		return r.CheckoutRef
+	}
+	return fmt.Sprintf("refs/pull/%d/head", pr)
 }
 
 // BranchRef returns branch refs format
@@ -412,11 +423,12 @@ func (g *Git) SSHCloneURL(source, owner, name string) string {
 }
 
 // HTTPSCloneURL returns HTTPS clone url
-func (g *Git) HTTPSCloneURL(source, token, owner, name string) string {
+func (g *Git) HTTPSCloneURL(source, token, owner, name string, optionalGiteeAddr string) string {
 	if strings.ToLower(source) == ProviderGitlab {
 		return fmt.Sprintf("https://%s/%s/%s.git", g.GetGitlabHost(), owner, name)
-	} else if strings.ToLower(source) == ProviderGitee {
-		return fmt.Sprintf("https://%s:%s@%s/%s/%s.git", OauthTokenPrefix, token, "gitee.com", owner, name)
+	} else if strings.ToLower(source) == ProviderGitee || strings.ToLower(source) == ProviderGiteeEE {
+		addrSegment := strings.Split(optionalGiteeAddr, "://")
+		return fmt.Sprintf("%s://%s:%s@%s/%s/%s.git", addrSegment[0], OauthTokenPrefix, token, addrSegment[1], owner, name)
 	}
 	//return fmt.Sprintf("https://x-access-token:%s@%s/%s/%s.git", g.GetInstallationToken(owner), g.GetGithubHost(), owner, name)
 	return fmt.Sprintf("https://x-access-token:%s@%s/%s/%s.git", token, g.GetGithubHost(), owner, name)
@@ -424,7 +436,7 @@ func (g *Git) HTTPSCloneURL(source, token, owner, name string) string {
 
 // SSHCloneURL returns Oauth clone url
 // e.g.
-//https://oauth2:ACCESS_TOKEN@somegitlab.com/owner/name.git
+// https://oauth2:ACCESS_TOKEN@somegitlab.com/owner/name.git
 func (g *Git) OAuthCloneURL(source, token, address, owner, name, scheme string) string {
 	if strings.ToLower(source) == ProviderGitlab || strings.ToLower(source) == ProviderOther {
 		// address 需要传过来

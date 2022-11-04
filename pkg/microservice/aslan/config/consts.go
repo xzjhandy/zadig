@@ -41,8 +41,9 @@ const (
 	EnvRecyclePolicyNever      = "never"
 
 	// 定时器的所属job类型
-	WorkflowCronjob = "workflow"
-	TestingCronjob  = "test"
+	WorkflowCronjob   = "workflow"
+	WorkflowV4Cronjob = "workflow_v4"
+	TestingCronjob    = "test"
 )
 
 var (
@@ -97,22 +98,23 @@ const (
 type Status string
 
 const (
-	StatusDisabled   Status = "disabled"
-	StatusCreated    Status = "created"
-	StatusRunning    Status = "running"
-	StatusPassed     Status = "passed"
-	StatusSkipped    Status = "skipped"
-	StatusFailed     Status = "failed"
-	StatusTimeout    Status = "timeout"
-	StatusCancelled  Status = "cancelled"
-	StatusWaiting    Status = "waiting"
-	StatusQueued     Status = "queued"
-	StatusBlocked    Status = "blocked"
-	QueueItemPending Status = "pending"
-	StatusChanged    Status = "changed"
-	StatusNotRun     Status = "notRun"
-	StatusPrepare    Status = "prepare"
-	StatusReject     Status = "reject"
+	StatusDisabled       Status = "disabled"
+	StatusCreated        Status = "created"
+	StatusRunning        Status = "running"
+	StatusPassed         Status = "passed"
+	StatusSkipped        Status = "skipped"
+	StatusFailed         Status = "failed"
+	StatusTimeout        Status = "timeout"
+	StatusCancelled      Status = "cancelled"
+	StatusWaiting        Status = "waiting"
+	StatusQueued         Status = "queued"
+	StatusBlocked        Status = "blocked"
+	QueueItemPending     Status = "pending"
+	StatusChanged        Status = "changed"
+	StatusNotRun         Status = "notRun"
+	StatusPrepare        Status = "prepare"
+	StatusReject         Status = "reject"
+	StatusWaitingApprove Status = "waitforapprove"
 )
 
 type TaskStatus string
@@ -160,22 +162,36 @@ const (
 	StepDockerBuild       StepType = "docker_build"
 	StepDeploy            StepType = "deploy"
 	StepHelmDeploy        StepType = "helm_deploy"
+	StepCustomDeploy      StepType = "custom_deploy"
 	StepImageDistribute   StepType = "image_distribute"
 	StepArchive           StepType = "archive"
 	StepArchiveDistribute StepType = "archive_distribute"
 	StepJunitReport       StepType = "junit_report"
 	StepHtmlReport        StepType = "html_report"
+	StepTarArchive        StepType = "tar_archive"
+	StepSonarCheck        StepType = "sonar_check"
 )
 
 type JobType string
 
 const (
-	JobBuild       JobType = "build"
-	JobDeploy      JobType = "deploy"
-	JobZadigBuild  JobType = "zadig-build"
-	JobZadigDeploy JobType = "zadig-deploy"
-	JobFreestyle   JobType = "freestyle"
-	JobPlugin      JobType = "plugin"
+	JobBuild               JobType = "build"
+	JobDeploy              JobType = "deploy"
+	JobZadigBuild          JobType = "zadig-build"
+	JobZadigTesting        JobType = "zadig-test"
+	JobZadigScanning       JobType = "zadig-scanning"
+	JobCustomDeploy        JobType = "custom-deploy"
+	JobZadigDeploy         JobType = "zadig-deploy"
+	JobZadigHelmDeploy     JobType = "zadig-helm-deploy"
+	JobFreestyle           JobType = "freestyle"
+	JobPlugin              JobType = "plugin"
+	JobK8sBlueGreenDeploy  JobType = "k8s-blue-green-deploy"
+	JobK8sBlueGreenRelease JobType = "k8s-blue-green-release"
+	JobK8sCanaryDeploy     JobType = "k8s-canary-deploy"
+	JobK8sCanaryRelease    JobType = "k8s-canary-release"
+	JobK8sGrayRelease      JobType = "k8s-gray-release"
+	JobK8sGrayRollback     JobType = "k8s-gray-rollback"
+	JobK8sPatch            JobType = "k8s-resource-patch"
 )
 
 type ApproveOrReject string
@@ -220,7 +236,7 @@ const (
 	NameSpaceRegexString = "[^a-z0-9.-]"
 )
 
-//ProductPermission ...
+// ProductPermission ...
 type ProductPermission string
 
 // ProductAuthType ...
@@ -283,4 +299,48 @@ const (
 	CommonEnvCfgTypeConfigMap CommonEnvCfgType = "ConfigMap"
 	CommonEnvCfgTypeSecret    CommonEnvCfgType = "Secret"
 	CommonEnvCfgTypePvc       CommonEnvCfgType = "PVC"
+)
+
+// for custom blue-green release job
+const (
+	BlueGreenVerionLabelName = "zadig-blue-green-version"
+	BlueServiceNameSuffix    = "-zadig-blue"
+	OriginVersion            = "origin"
+)
+
+// for custom gray release job
+const (
+	GrayLabelKey               = "zadig-gray-release"
+	GrayLabelValue             = "released-by-zadig"
+	GrayImageAnnotationKey     = "zadig-gray-release-image"
+	GrayContainerAnnotationKey = "zadig-gray-release-container"
+	GrayReplicaAnnotationKey   = "zadig-gray-release-replica"
+	GrayDeploymentSuffix       = "-zadig-gray"
+)
+
+type ProjectType string
+
+const (
+	ProjectTypeHelm   = "helm"
+	ProjectTypeYaml   = "yaml"
+	ProjectTypeVM     = "vm"
+	ProjectTypeLoaded = "loaded"
+)
+
+type RegistryProvider string
+
+const (
+	RegistryProviderACR       = "acr"
+	RegistryProviderSWR       = "swr"
+	RegistryProviderTCR       = "tcr"
+	RegistryProviderHarbor    = "harbor"
+	RegistryProviderDockerhub = "dockerhub"
+	RegistryProviderECR       = "ecr"
+	RegistryProviderNative    = "native"
+)
+
+const (
+	TestJobJunitReportStepName   = "junit-report-step"
+	TestJobHTMLReportStepName    = "html-report-step"
+	TestJobArchiveResultStepName = "archive-result-step"
 )

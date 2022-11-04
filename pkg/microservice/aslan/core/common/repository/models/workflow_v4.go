@@ -30,6 +30,7 @@ import (
 type WorkflowV4 struct {
 	ID             primitive.ObjectID `bson:"_id,omitempty"       yaml:"-"            json:"id"`
 	Name           string             `bson:"name"                yaml:"name"         json:"name"`
+	DisplayName    string             `bson:"display_name"        yaml:"display_name" json:"display_name"`
 	KeyVals        []*KeyVal          `bson:"key_vals"            yaml:"key_vals"     json:"key_vals"`
 	Params         []*Param           `bson:"params"              yaml:"params"       json:"params"`
 	Stages         []*WorkflowStage   `bson:"stages"              yaml:"stages"       json:"stages"`
@@ -40,9 +41,11 @@ type WorkflowV4 struct {
 	UpdatedBy      string             `bson:"updated_by"          yaml:"updated_by"   json:"updated_by"`
 	UpdateTime     int64              `bson:"update_time"         yaml:"update_time"  json:"update_time"`
 	MultiRun       bool               `bson:"multi_run"           yaml:"multi_run"    json:"multi_run"`
+	NotifyCtls     []*NotifyCtl       `bson:"notify_ctls"         yaml:"notify_ctls"  json:"notify_ctls"`
 	HookCtls       []*WorkflowV4Hook  `bson:"hook_ctl"            yaml:"-"            json:"hook_ctl"`
 	NotificationID string             `bson:"notification_id"     yaml:"-"            json:"notification_id"`
 	HookPayload    *HookPayload       `bson:"hook_payload"        yaml:"-"            json:"hook_payload,omitempty"`
+	BaseName       string             `bson:"base_name"           yaml:"-"            json:"base_name"`
 }
 
 type WorkflowStage struct {
@@ -72,7 +75,27 @@ type User struct {
 type Job struct {
 	Name    string         `bson:"name"           yaml:"name"     json:"name"`
 	JobType config.JobType `bson:"type"           yaml:"type"     json:"type"`
-	Spec    interface{}    `bson:"spec"           yaml:"spec"     json:"spec"`
+	// only for webhook workflow args to skip some tasks.
+	Skipped bool        `bson:"skipped"        yaml:"skipped"  json:"skipped"`
+	Spec    interface{} `bson:"spec"           yaml:"spec"     json:"spec"`
+}
+
+type CustomDeployJobSpec struct {
+	Namespace          string `bson:"namespace"              json:"namespace"             yaml:"namespace"`
+	ClusterID          string `bson:"cluster_id"             json:"cluster_id"            yaml:"cluster_id"`
+	DockerRegistryID   string `bson:"docker_registry_id"     json:"docker_registry_id"    yaml:"docker_registry_id"`
+	SkipCheckRunStatus bool   `bson:"skip_check_run_status"  json:"skip_check_run_status" yaml:"skip_check_run_status"`
+	// support two sources, runtime/fixed.
+	Source string `bson:"source"                 json:"source"                yaml:"source"`
+	// unit is minute.
+	Timeout int64            `bson:"timeout"                json:"timeout"               yaml:"timeout"`
+	Targets []*DeployTargets `bson:"targets"                json:"targets"               yaml:"targets"`
+}
+
+type DeployTargets struct {
+	// workload_type/workload_name/container_name.
+	Target string `bson:"target"           json:"target"            yaml:"target"`
+	Image  string `bson:"image,omitempty"  json:"image,omitempty"   yaml:"image,omitempty"`
 }
 
 type PluginJobSpec struct {
@@ -115,7 +138,127 @@ type ZadigDeployJobSpec struct {
 type ServiceAndImage struct {
 	ServiceName   string `bson:"service_name"        yaml:"service_name"     json:"service_name"`
 	ServiceModule string `bson:"service_module"      yaml:"service_module"   json:"service_module"`
-	Image         string `bson:"image"               yaml:"image"           json:"image"`
+	Image         string `bson:"image"               yaml:"image"            json:"image"`
+}
+
+type ZadigTestingJobSpec struct {
+	TestModules []*TestModule `bson:"test_modules"     yaml:"test_modules"     json:"test_modules"`
+}
+
+type TestModule struct {
+	Name        string              `bson:"name"                yaml:"name"             json:"name"`
+	ProjectName string              `bson:"project_name"        yaml:"project_name"     json:"project_name"`
+	KeyVals     []*KeyVal           `bson:"key_vals"            yaml:"key_vals"         json:"key_vals"`
+	Repos       []*types.Repository `bson:"repos"               yaml:"repos"            json:"repos"`
+}
+
+type ZadigScanningJobSpec struct {
+	Scannings []*ScanningModule `bson:"scannings"     yaml:"scannings"     json:"scannings"`
+}
+
+type ScanningModule struct {
+	Name        string              `bson:"name"                yaml:"name"             json:"name"`
+	ProjectName string              `bson:"project_name"        yaml:"project_name"     json:"project_name"`
+	Repos       []*types.Repository `bson:"repos"                yaml:"repos"           json:"repos"`
+}
+
+type BlueGreenDeployJobSpec struct {
+	ClusterID        string             `bson:"cluster_id"             json:"cluster_id"            yaml:"cluster_id"`
+	Namespace        string             `bson:"namespace"              json:"namespace"             yaml:"namespace"`
+	DockerRegistryID string             `bson:"docker_registry_id"     json:"docker_registry_id"    yaml:"docker_registry_id"`
+	Targets          []*BlueGreenTarget `bson:"targets"                json:"targets"               yaml:"targets"`
+}
+
+type BlueGreenReleaseJobSpec struct {
+	FromJob string `bson:"from_job"               json:"from_job"              yaml:"from_job"`
+}
+
+type BlueGreenTarget struct {
+	K8sServiceName     string `bson:"k8s_service_name"       json:"k8s_service_name"      yaml:"k8s_service_name"`
+	BlueK8sServiceName string `bson:"blue_k8s_service_name"  json:"blue_k8s_service_name" yaml:"-"`
+	ContainerName      string `bson:"container_name"         json:"container_name"        yaml:"container_name"`
+	Image              string `bson:"image"                  json:"image"                 yaml:"image"`
+	// unit is minute.
+	DeployTimeout    int64  `bson:"deploy_timeout"         json:"deploy_timeout"        yaml:"deploy_timeout"`
+	WorkloadName     string `bson:"workload_name"          json:"workload_name"         yaml:"workload_name"`
+	BlueWorkloadName string `bson:"blue_workload_name"     json:"blue_workload_name"    yaml:"-"`
+	WorkloadType     string `bson:"workload_type"          json:"workload_type"         yaml:"workload_type"`
+	Version          string `bson:"version"                json:"version"               yaml:"-"`
+}
+
+type CanaryDeployJobSpec struct {
+	ClusterID        string          `bson:"cluster_id"             json:"cluster_id"            yaml:"cluster_id"`
+	Namespace        string          `bson:"namespace"              json:"namespace"             yaml:"namespace"`
+	DockerRegistryID string          `bson:"docker_registry_id"     json:"docker_registry_id"    yaml:"docker_registry_id"`
+	Targets          []*CanaryTarget `bson:"targets"                json:"targets"               yaml:"targets"`
+}
+
+type CanaryReleaseJobSpec struct {
+	FromJob string `bson:"from_job"               json:"from_job"              yaml:"from_job"`
+	// unit is minute.
+	ReleaseTimeout int64 `bson:"release_timeout"        json:"release_timeout"       yaml:"release_timeout"`
+}
+
+type CanaryTarget struct {
+	K8sServiceName   string `bson:"k8s_service_name"       json:"k8s_service_name"      yaml:"k8s_service_name"`
+	ContainerName    string `bson:"container_name"         json:"container_name"        yaml:"container_name"`
+	Image            string `bson:"image"                  json:"image"                 yaml:"image"`
+	CanaryPercentage int    `bson:"canary_percentage"      json:"canary_percentage"     yaml:"canary_percentage"`
+	// unit is minute.
+	DeployTimeout int64  `bson:"deploy_timeout"         json:"deploy_timeout"        yaml:"deploy_timeout"`
+	WorkloadName  string `bson:"workload_name"          json:"workload_name"         yaml:"workload_name"`
+	WorkloadType  string `bson:"workload_type"          json:"workload_type"         yaml:"workload_type"`
+}
+
+type GrayReleaseJobSpec struct {
+	ClusterID        string `bson:"cluster_id"             json:"cluster_id"            yaml:"cluster_id"`
+	Namespace        string `bson:"namespace"              json:"namespace"             yaml:"namespace"`
+	DockerRegistryID string `bson:"docker_registry_id"     json:"docker_registry_id"    yaml:"docker_registry_id"`
+	FromJob          string `bson:"from_job"               json:"from_job"              yaml:"from_job"`
+	// unit is minute.
+	DeployTimeout int64                `bson:"deploy_timeout"         json:"deploy_timeout"        yaml:"deploy_timeout"`
+	GrayScale     int                  `bson:"gray_scale"             json:"gray_scale"            yaml:"gray_scale"`
+	Targets       []*GrayReleaseTarget `bson:"targets"                json:"targets"               yaml:"targets"`
+}
+
+type GrayReleaseTarget struct {
+	WorkloadType  string `bson:"workload_type"             json:"workload_type"            yaml:"workload_type"`
+	WorkloadName  string `bson:"workload_name"             json:"workload_name"            yaml:"workload_name"`
+	Replica       int    `bson:"replica,omitempty"         json:"replica,omitempty"        yaml:"replica,omitempty"`
+	ContainerName string `bson:"container_name"            json:"container_name"           yaml:"container_name"`
+	Image         string `bson:"image,omitempty"           json:"image,omitempty"          yaml:"image,omitempty"`
+}
+
+type K8sPatchJobSpec struct {
+	ClusterID  string       `bson:"cluster_id"             json:"cluster_id"            yaml:"cluster_id"`
+	Namespace  string       `bson:"namespace"              json:"namespace"             yaml:"namespace"`
+	PatchItems []*PatchItem `bson:"patch_items"            json:"patch_items"           yaml:"patch_items"`
+}
+
+type PatchItem struct {
+	ResourceName    string   `bson:"resource_name"                json:"resource_name"               yaml:"resource_name"`
+	ResourceKind    string   `bson:"resource_kind"                json:"resource_kind"               yaml:"resource_kind"`
+	ResourceGroup   string   `bson:"resource_group"               json:"resource_group"              yaml:"resource_group"`
+	ResourceVersion string   `bson:"resource_version"             json:"resource_version"            yaml:"resource_version"`
+	PatchContent    string   `bson:"patch_content"                json:"patch_content"               yaml:"patch_content"`
+	Params          []*Param `bson:"params"                       json:"params"                      yaml:"params"`
+	// support strategic-merge/merge/json
+	PatchStrategy string `bson:"patch_strategy"          json:"patch_strategy"         yaml:"patch_strategy"`
+}
+
+type GrayRollbackJobSpec struct {
+	ClusterID string `bson:"cluster_id"             json:"cluster_id"            yaml:"cluster_id"`
+	Namespace string `bson:"namespace"              json:"namespace"             yaml:"namespace"`
+	// unit is minute.
+	RollbackTimeout int64                 `bson:"rollback_timeout"       json:"rollback_timeout"      yaml:"rollback_timeout"`
+	Targets         []*GrayRollbackTarget `bson:"targets"                json:"targets"               yaml:"targets"`
+}
+
+type GrayRollbackTarget struct {
+	WorkloadType  string `bson:"workload_type"             json:"workload_type"            yaml:"workload_type"`
+	WorkloadName  string `bson:"workload_name"             json:"workload_name"            yaml:"workload_name"`
+	OriginImage   string `bson:"-"                         json:"origin_image"             yaml:"origin_image,omitempty"`
+	OriginReplica int    `bson:"-"                         json:"origin_replica"           yaml:"origin_replica,omitempty"`
 }
 
 type JobProperties struct {
@@ -131,7 +274,7 @@ type JobProperties struct {
 	Envs            []*KeyVal           `bson:"envs"                   json:"envs"                  yaml:"envs"`
 	// log user-defined variables, shows in workflow task detail.
 	CustomEnvs   []*KeyVal            `bson:"custom_envs"            json:"custom_envs"           yaml:"custom_envs,omitempty"`
-	Params       []*Param             `bson:"params"               	 json:"params"                yaml:"params"`
+	Params       []*Param             `bson:"params"                 json:"params"                yaml:"params"`
 	Paths        string               `bson:"-"                      json:"-"                     yaml:"-"`
 	LogFileName  string               `bson:"log_file_name"          json:"log_file_name"         yaml:"log_file_name"`
 	DockerHost   string               `bson:"-"                      json:"docker_host,omitempty" yaml:"docker_host,omitempty"`
@@ -168,7 +311,7 @@ type WorkflowV4Hook struct {
 type Param struct {
 	Name        string `bson:"name"             json:"name"             yaml:"name"`
 	Description string `bson:"description"      json:"description"      yaml:"description"`
-	// support string/text type
+	// support string/text/choice type
 	ParamsType   string   `bson:"type"                      json:"type"                        yaml:"type"`
 	Value        string   `bson:"value"                     json:"value"                       yaml:"value,omitempty"`
 	ChoiceOption []string `bson:"choice_option,omitempty"   json:"choice_option,omitempty"     yaml:"choice_option,omitempty"`

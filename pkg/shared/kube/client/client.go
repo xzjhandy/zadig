@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/koderover/zadig/pkg/config"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -41,6 +42,9 @@ func GetKubeClient(hubserverAddr, clusterID string) (client.Client, error) {
 	cluster, err := aslanClient.New(config.AslanServiceAddress()).GetClusterInfo(clusterID)
 	if err != nil {
 		return nil, err
+	}
+	if cluster == nil {
+		return nil, fmt.Errorf("cluster %s not found", clusterID)
 	}
 
 	switch cluster.Type {
@@ -160,5 +164,27 @@ func GetClientset(hubServerAddr, clusterID string) (kubernetes.Interface, error)
 		return multicluster.GetClientSetFromKubeConfig(clusterID, cluster.KubeConfig)
 	default:
 		return nil, fmt.Errorf("failed to create kubeclient: unknown cluster type: %s", cluster.Type)
+	}
+}
+
+func GetDiscoveryClient(hubServerAddr, clusterID string) (*discovery.DiscoveryClient, error) {
+	if clusterID == setting.LocalClusterID || clusterID == "" {
+		if clusterID == setting.LocalClusterID {
+			clusterID = ""
+		}
+		return multicluster.GetDiscoveryClient(hubServerAddr, clusterID)
+	}
+	cluster, err := aslanClient.New(config.AslanServiceAddress()).GetClusterInfo(clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	switch cluster.Type {
+	case setting.AgentClusterType, "":
+		return multicluster.GetDiscoveryClient(hubServerAddr, clusterID)
+	case setting.KubeConfigClusterType:
+		return multicluster.GetDiscoveryClientFromKubeConfig(clusterID, cluster.KubeConfig)
+	default:
+		return nil, fmt.Errorf("failed to create discovery client: unknown cluster type: %s", cluster.Type)
 	}
 }

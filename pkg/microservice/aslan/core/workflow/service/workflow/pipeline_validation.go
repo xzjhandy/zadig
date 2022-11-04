@@ -144,7 +144,7 @@ func validateSubTaskSetting(pipeName string, subtasks []map[string]interface{}) 
 			ensureTaskSecretEnvs(pipeName, config.TaskTestingV2, t.JobCtx.EnvVars)
 
 			// 设置 build 安装脚本
-			t.InstallCtx, err = buildInstallCtx(t.InstallItems)
+			t.InstallCtx, err = BuildInstallCtx(t.InstallItems)
 			if err != nil {
 				log.Errorf("buildInstallCtx error: %v", err)
 				return err
@@ -216,8 +216,8 @@ func getTaskEnvs(pipelineName string) map[string]string {
 	return resp
 }
 
-//根据用户的配置和BuildStep中步骤的依赖，从系统配置的InstallItems中获取配置项，构建Install Context
-func buildInstallCtx(installItems []*commonmodels.Item) ([]*commonmodels.Install, error) {
+// 根据用户的配置和BuildStep中步骤的依赖，从系统配置的InstallItems中获取配置项，构建Install Context
+func BuildInstallCtx(installItems []*commonmodels.Item) ([]*commonmodels.Install, error) {
 	resp := make([]*commonmodels.Install, 0)
 
 	for _, item := range installItems {
@@ -245,7 +245,7 @@ func fmtBuildsTask(build *task.Build, log *zap.SugaredLogger) {
 	FmtBuilds(build.JobCtx.Builds, log)
 }
 
-//replace gitInfo with codehostID
+// replace gitInfo with codehostID
 func FmtBuilds(builds []*types.Repository, log *zap.SugaredLogger) {
 	for _, repo := range builds {
 		cID := repo.CodehostID
@@ -303,6 +303,10 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 		log.Errorf("failed to get codehost detail %d %v", build.CodehostID, err)
 		return
 	}
+	if build.PR > 0 && len(build.PRs) == 0 {
+		build.PRs = []int{build.PR}
+	}
+	build.Address = codeHostInfo.Address
 	if codeHostInfo.Type == systemconfig.GitLabProvider || codeHostInfo.Type == systemconfig.GerritProvider {
 		if build.CommitID == "" {
 			var commit *RepoCommit
@@ -310,10 +314,10 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 			var err error
 			if build.Tag != "" {
 				commit, err = QueryByTag(build.CodehostID, build.GetRepoNamespace(), build.RepoName, build.Tag, log)
-			} else if build.Branch != "" && build.PR == 0 {
+			} else if build.Branch != "" && len(build.PRs) == 0 {
 				commit, err = QueryByBranch(build.CodehostID, build.GetRepoNamespace(), build.RepoName, build.Branch, log)
-			} else if build.PR > 0 {
-				pr, err = GetLatestPrCommit(build.CodehostID, build.PR, build.GetRepoNamespace(), build.RepoName, log)
+			} else if len(build.PRs) > 0 {
+				pr, err = GetLatestPrCommit(build.CodehostID, getlatestPrNum(build), build.GetRepoNamespace(), build.RepoName, log)
 				if err == nil && pr != nil {
 					commit = &RepoCommit{
 						ID:         pr.ID,
@@ -351,11 +355,11 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 				}
 			}
 		}
-	} else if codeHostInfo.Type == systemconfig.GiteeProvider {
-		gitCli := gitee.NewClient(codeHostInfo.ID, codeHostInfo.AccessToken, config.ProxyHTTPSAddr(), codeHostInfo.EnableProxy)
+	} else if codeHostInfo.Type == systemconfig.GiteeProvider || codeHostInfo.Type == systemconfig.GiteeEEProvider {
+		gitCli := gitee.NewClient(codeHostInfo.ID, codeHostInfo.Address, codeHostInfo.AccessToken, config.ProxyHTTPSAddr(), codeHostInfo.EnableProxy)
 		if build.CommitID == "" {
-			if build.Tag != "" && build.PR == 0 {
-				tags, err := gitCli.ListTags(context.Background(), codeHostInfo.AccessToken, build.RepoOwner, build.RepoName)
+			if build.Tag != "" && len(build.PRs) == 0 {
+				tags, err := gitCli.ListTags(context.Background(), codeHostInfo.Address, codeHostInfo.AccessToken, build.RepoOwner, build.RepoName)
 				if err != nil {
 					log.Errorf("failed to gitee ListTags err:%s", err)
 					return
@@ -364,7 +368,7 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 				for _, tag := range tags {
 					if tag.Name == build.Tag {
 						build.CommitID = tag.Commit.Sha
-						commitInfo, err := gitCli.GetSingleCommitOfProject(context.Background(), codeHostInfo.AccessToken, build.RepoOwner, build.RepoName, build.CommitID)
+						commitInfo, err := gitCli.GetSingleCommitOfProject(context.Background(), codeHostInfo.Address, codeHostInfo.AccessToken, build.RepoOwner, build.RepoName, build.CommitID)
 						if err != nil {
 							log.Errorf("failed to gitee GetCommit %s err:%s", tag.Commit.Sha, err)
 							return
@@ -374,8 +378,8 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 						return
 					}
 				}
-			} else if build.Branch != "" && build.PR == 0 {
-				branch, err := gitCli.GetSingleBranch(codeHostInfo.AccessToken, build.RepoOwner, build.RepoName, build.Branch)
+			} else if build.Branch != "" && len(build.PRs) == 0 {
+				branch, err := gitCli.GetSingleBranch(codeHostInfo.Address, codeHostInfo.AccessToken, build.RepoOwner, build.RepoName, build.Branch)
 				if err != nil {
 					log.Errorf("failed to gitee GetSingleBranch  repoOwner:%s,repoName:%s,repoBranch:%s err:%s", build.RepoOwner, build.RepoName, build.Branch, err)
 					return
@@ -383,8 +387,8 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 				build.CommitID = branch.Commit.Sha
 				build.CommitMessage = branch.Commit.Commit.Message
 				build.AuthorName = branch.Commit.Commit.Author.Name
-			} else if build.PR > 0 {
-				prCommits, err := gitCli.ListCommits(context.Background(), build.RepoOwner, build.RepoName, build.PR, nil)
+			} else if len(build.PRs) > 0 {
+				prCommits, err := gitCli.ListCommits(context.Background(), build.RepoOwner, build.RepoName, getlatestPrNum(build), nil)
 				sort.SliceStable(prCommits, func(i, j int) bool {
 					return prCommits[i].Commit.Committer.Date.Unix() > prCommits[j].Commit.Committer.Date.Unix()
 				})
@@ -401,7 +405,7 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 	} else if codeHostInfo.Type == systemconfig.GitHubProvider {
 		gitCli := git.NewClient(codeHostInfo.AccessToken, config.ProxyHTTPSAddr(), codeHostInfo.EnableProxy)
 		if build.CommitID == "" {
-			if build.Tag != "" && build.PR == 0 {
+			if build.Tag != "" && len(build.PRs) == 0 {
 				opt := &github.ListOptions{Page: 1, PerPage: 100}
 				tags, _, err := gitCli.Repositories.ListTags(context.Background(), build.RepoOwner, build.RepoName, opt)
 				if err != nil {
@@ -423,16 +427,16 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 						return
 					}
 				}
-			} else if build.Branch != "" && build.PR == 0 {
+			} else if build.Branch != "" && len(build.PRs) == 0 {
 				branch, _, err := gitCli.Repositories.GetBranch(context.Background(), build.RepoOwner, build.RepoName, build.Branch)
 				if err == nil {
 					build.CommitID = *branch.Commit.SHA
 					build.CommitMessage = *branch.Commit.Commit.Message
 					build.AuthorName = *branch.Commit.Commit.Author.Name
 				}
-			} else if build.PR > 0 {
+			} else if len(build.PRs) > 0 {
 				opt := &github.ListOptions{Page: 1, PerPage: 100}
-				prCommits, _, err := gitCli.PullRequests.ListCommits(context.Background(), build.RepoOwner, build.RepoName, build.PR, opt)
+				prCommits, _, err := gitCli.PullRequests.ListCommits(context.Background(), build.RepoOwner, build.RepoName, getlatestPrNum(build), opt)
 				sort.SliceStable(prCommits, func(i, j int) bool {
 					return prCommits[i].Commit.Committer.Date.Unix() > prCommits[j].Commit.Committer.Date.Unix()
 				})
@@ -462,21 +466,39 @@ func setBuildInfo(build *types.Repository, buildArgs []*types.Repository, log *z
 	}
 }
 
+func getlatestPrNum(build *types.Repository) int {
+	var prNum int
+	if len(build.PRs) > 0 {
+		prNum = build.PRs[len(build.PRs)-1]
+	}
+	return prNum
+}
+
 // 根据传入的build arg设置build参数
 func setBuildFromArg(build, buildArg *types.Repository) {
-	// 单pr编译
+	// single pr build
 	if buildArg.PR > 0 && len(buildArg.Branch) == 0 {
-		build.PR = buildArg.PR
+		build.PRs = []int{buildArg.PR}
 		build.Branch = ""
 	}
-	//pr rebase branch编译
+	//single pr rebase branch build
 	if buildArg.PR > 0 && len(buildArg.Branch) > 0 {
-		build.PR = buildArg.PR
+		build.PRs = []int{buildArg.PR}
 		build.Branch = buildArg.Branch
 	}
-	// 单branch编译
-	if buildArg.PR == 0 && len(buildArg.Branch) > 0 {
-		build.PR = 0
+	// multi prs build
+	if len(buildArg.PRs) > 0 && len(buildArg.Branch) == 0 {
+		build.PRs = buildArg.PRs
+		build.Branch = ""
+	}
+	//multi prs rebase branch build
+	if len(buildArg.PRs) > 0 && len(buildArg.Branch) > 0 {
+		build.PRs = buildArg.PRs
+		build.Branch = buildArg.Branch
+	}
+	// single branch build
+	if buildArg.PR == 0 && len(buildArg.PRs) == 0 && len(buildArg.Branch) > 0 {
+		build.PRs = []int{}
 		build.Branch = buildArg.Branch
 	}
 

@@ -18,21 +18,25 @@ package handler
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"gopkg.in/yaml.v3"
+
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
 	internalhandler "github.com/koderover/zadig/pkg/shared/handler"
+	"github.com/koderover/zadig/pkg/tool/errors"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/log"
-	"gopkg.in/yaml.v3"
 )
 
 type listWorkflowV4Query struct {
 	PageSize int64  `json:"page_size"    form:"page_size,default=20"`
 	PageNum  int64  `json:"page_num"     form:"page_num,default=1"`
 	Project  string `json:"project"      form:"project"`
+	ViewName string `json:"view_name"    form:"view_name"`
 }
 
 type listWorkflowV4Resp struct {
@@ -53,7 +57,7 @@ func CreateWorkflowV4(c *gin.Context) {
 		log.Errorf("CreateWorkflowv4 json.Unmarshal err : %s", err)
 	}
 
-	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
 
 	if err := c.ShouldBindYAML(&args); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
@@ -76,7 +80,7 @@ func LintWorkflowV4(c *gin.Context) {
 		log.Errorf("CreateWorkflowv4 json.Unmarshal err : %s", err)
 	}
 
-	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
 
 	if err := c.ShouldBindYAML(&args); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
@@ -93,13 +97,18 @@ func ListWorkflowV4(c *gin.Context) {
 		ctx.Err = err
 		return
 	}
-	ignoreWorkflow := false
 	workflowNames, found := internalhandler.GetResourcesInHeader(c)
-	if found && len(workflowNames) == 0 {
-		ignoreWorkflow = true
-	}
 
-	workflowList, err := workflow.ListWorkflowV4(args.Project, ctx.UserID, workflowNames, ignoreWorkflow, ctx.Logger)
+	ctx.Logger.Infof("workflowNames:%s found:%v", workflowNames, found)
+	var workflowV4Names, names []string
+	for _, name := range workflowNames {
+		if strings.HasPrefix(name, "common##") {
+			workflowV4Names = append(workflowV4Names, strings.Split(name, "##")[1])
+		} else {
+			names = append(names, name)
+		}
+	}
+	workflowList, err := workflow.ListWorkflowV4(args.Project, args.ViewName, ctx.UserID, names, workflowV4Names, found, ctx.Logger)
 	resp := listWorkflowV4Resp{
 		WorkflowList: workflowList,
 		Total:        0,
@@ -121,7 +130,7 @@ func UpdateWorkflowV4(c *gin.Context) {
 		log.Errorf("UpdateWorkflowV4 json.Unmarshal err : %s", err)
 	}
 
-	c.Request.Body = ioutil.NopCloser(bytes.NewBuffer(data))
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(data))
 
 	if err := c.ShouldBindYAML(&args); err != nil {
 		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
@@ -163,7 +172,7 @@ func GetWebhookForWorkflowV4Preset(c *gin.Context) {
 	ctx.Resp, ctx.Err = workflow.GetWebhookForWorkflowV4Preset(c.Query("workflowName"), c.Query("triggerName"), ctx.Logger)
 }
 
-func ListWebhookForWorkflowV4Preset(c *gin.Context) {
+func ListWebhookForWorkflowV4(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
@@ -199,4 +208,61 @@ func DeleteWebhookForWorkflowV4(c *gin.Context) {
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
 	ctx.Err = workflow.DeleteWebhookForWorkflowV4(c.Param("workflowName"), c.Param("triggerName"), ctx.Logger)
+}
+
+func GetCronForWorkflowV4Preset(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = workflow.GetCronForWorkflowV4Preset(c.Query("workflowName"), c.Query("cronID"), ctx.Logger)
+}
+
+func ListCronForWorkflowV4(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = workflow.ListCronForWorkflowV4(c.Query("workflowName"), ctx.Logger)
+}
+
+func CreateCronForWorkflowV4(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	req := new(commonmodels.Cronjob)
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
+		return
+	}
+	ctx.Err = workflow.CreateCronForWorkflowV4(c.Param("workflowName"), req, ctx.Logger)
+}
+
+func UpdateCronForWorkflowV4(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	req := new(commonmodels.Cronjob)
+	if err := c.ShouldBindJSON(req); err != nil {
+		ctx.Err = e.ErrInvalidParam.AddDesc(err.Error())
+		return
+	}
+	ctx.Err = workflow.UpdateCronForWorkflowV4(req, ctx.Logger)
+}
+
+func DeleteCronForWorkflowV4(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Err = workflow.DeleteCronForWorkflowV4(c.Param("workflowName"), c.Param("cronID"), ctx.Logger)
+}
+
+func GetPatchParams(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+	req := &commonmodels.PatchItem{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		ctx.Err = errors.ErrInvalidParam.AddDesc(err.Error())
+		return
+	}
+
+	ctx.Resp, ctx.Err = workflow.GetPatchParams(req, ctx.Logger)
 }

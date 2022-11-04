@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
+	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
 	"github.com/koderover/zadig/pkg/setting"
@@ -47,6 +48,8 @@ type GetContainerOptions struct {
 	Namespace     string
 	PipelineName  string
 	SubTask       string
+	JobName       string
+	JobType       string
 	TailLines     int64
 	TaskID        int64
 	PipelineType  string
@@ -203,6 +206,57 @@ func WorkflowTaskV4ContainerLogStream(ctx context.Context, streamChan chan inter
 		return
 	}
 	log.Debugf("Start to get task container log.")
+	task, err := commonrepo.NewworkflowTaskv4Coll().Find(options.PipelineName, options.TaskID)
+	if err != nil {
+		log.Errorf("Failed to find workflow %s taskID %s: %v", options.PipelineName, options.TaskID, err)
+		return
+	}
+	for _, stage := range task.Stages {
+		for _, job := range stage.Jobs {
+			if job.Name != options.SubTask {
+				continue
+			}
+			options.JobName = job.K8sJobName
+			options.JobType = job.JobType
+			switch job.JobType {
+			case string(config.JobZadigBuild):
+				fallthrough
+			case string(config.JobFreestyle):
+				fallthrough
+			case string(config.JobZadigTesting):
+				fallthrough
+			case string(config.JobZadigScanning):
+				fallthrough
+			case string(config.JobBuild):
+				jobSpec := &commonmodels.JobTaskFreestyleSpec{}
+				if err := commonmodels.IToi(job.Spec, jobSpec); err != nil {
+					log.Errorf("Failed to parse job spec: %v", err)
+					return
+				}
+				options.ClusterID = jobSpec.Properties.ClusterID
+			case string(config.JobPlugin):
+				jobSpec := &commonmodels.JobTaskPluginSpec{}
+				if err := commonmodels.IToi(job.Spec, jobSpec); err != nil {
+					log.Errorf("Failed to parse job spec: %v", err)
+					return
+				}
+				options.ClusterID = jobSpec.Properties.ClusterID
+			default:
+				log.Errorf("get real-time log error, unsupported job type %s", job.JobType)
+				return
+			}
+			if options.ClusterID == "" {
+				options.ClusterID = setting.LocalClusterID
+			}
+			switch options.ClusterID {
+			case setting.LocalClusterID:
+				options.Namespace = config.Namespace()
+			default:
+				options.Namespace = setting.AttachedClusterNamespace
+			}
+			break
+		}
+	}
 
 	selector := getWorkflowSelector(options)
 	waitAndGetLog(ctx, streamChan, selector, options, log)
@@ -300,8 +354,8 @@ func getPipelineSelector(options *GetContainerOptions) labels.Selector {
 
 func getWorkflowSelector(options *GetContainerOptions) labels.Selector {
 	retMap := map[string]string{
-		setting.JobLabelTaskKey: fmt.Sprintf("%s-%d", strings.ToLower(options.PipelineName), options.TaskID),
-		setting.JobLabelNameKey: strings.Replace(options.SubTask, "_", "-", -1),
+		setting.JobLabelSTypeKey: strings.Replace(options.JobType, "_", "-", -1),
+		setting.JobLabelNameKey:  strings.Replace(options.JobName, "_", "-", -1),
 	}
 	// no need to add labels with empty value to a job
 	for k, v := range retMap {

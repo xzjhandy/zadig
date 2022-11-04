@@ -58,6 +58,10 @@ func ListHelmRepos(encryptedKey string, log *zap.SugaredLogger) ([]*commonmodels
 	return helmRepos, nil
 }
 
+func ListHelmReposPublic() ([]*commonmodels.HelmRepo, error) {
+	return commonrepo.NewHelmRepoColl().List()
+}
+
 func PreLoadServiceManifests(base string, svc *commonmodels.Service) error {
 	ok, err := fsutil.DirExists(base)
 	if err != nil {
@@ -76,7 +80,7 @@ func PreLoadServiceManifests(base string, svc *commonmodels.Service) error {
 	switch svc.Source {
 	case setting.SourceFromGerrit:
 		return preLoadServiceManifestsFromGerrit(svc)
-	case setting.SourceFromGitee:
+	case setting.SourceFromGitee, setting.SourceFromGiteeEE:
 		return preLoadServiceManifestsFromGitee(svc)
 	default:
 		return preLoadServiceManifestsFromSource(svc)
@@ -117,7 +121,7 @@ func CopyAndUploadService(projectName, serviceName, currentChartPath string, cop
 	s3Base := config.ObjectStorageServicePath(projectName, serviceName)
 	names := append([]string{serviceName}, copies...)
 
-	return fsservice.CopyAndUploadFiles(names, path.Join(localBase, serviceName), s3Base, currentChartPath, log.SugaredLogger())
+	return fsservice.CopyAndUploadFiles(names, path.Join(localBase, serviceName), s3Base, localBase, currentChartPath, log.SugaredLogger())
 }
 
 func preLoadServiceManifestsFromSource(svc *commonmodels.Service) error {

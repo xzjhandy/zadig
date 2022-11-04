@@ -1,12 +1,21 @@
 description: "public urls: url not need to authentication ; system_admin urls: urls that only system admin has permission ; project_admin: urls that project admin has permission"
 exemption_urls:
   public:
+    - endpoint: api/plutus/health
+      methods:
+        - GET
+    - endpoint: api/plutus/organization
+      methods:
+        - GET
     - endpoint: api/plutus/version/new/check
       methods:
         - GET
     - endpoint: api/plutus/license/sync
       methods:
         - POST
+    - endpoint: api/plutus/license/download/**
+      methods:
+        - GET
     - endpoint: api/plutus/customer/uploadBaseUri
       methods:
         - POST
@@ -19,13 +28,16 @@ exemption_urls:
     - endpoint: api/plutus/license/check
       methods:
         - POST
-    - endpoint: license
-      methods:
-        - GET
     - endpoint: api/plutus/signature
       methods:
         - POST
-    - endpoint: api/plutus/**
+    - endpoint: api/plutus/signature/status
+      methods:
+        - GET
+    - endpoint: api/plutus/customer/installer/**
+      methods:
+        - GET
+    - endpoint: api/plutus/connect
       methods:
         - GET
     - endpoint: plutus-vendor/**
@@ -56,6 +68,9 @@ exemption_urls:
       methods:
         - GET
     - endpoint: api/aslan/testing/report
+      methods:
+        - GET
+    - endpoint: api/aslan/testing/report/workflowv4/?*/id/?*/job/?*
       methods:
         - GET
     - endpoint: api/aslan/cluster/agent/?*/agent.yaml
@@ -339,6 +354,9 @@ exemption_urls:
     - endpoint: api/aslan/environment/envcfgs/?*/sync
       methods:
         - PUT
+    - endpoint: api/aslan/workflow/plugin/enterprise
+      methods:
+        - POST
   project_admin:
     - endpoint: api/aslan/project/products
       methods:
@@ -448,3 +466,17 @@ exemption_urls:
       methods:
         - GET
         - POST
+    - endpoint: api/aslan/workflow/view
+      methods:
+        - POST
+        - PUT
+    - endpoint: api/aslan/workflow/view/?*/?*
+      methods:
+        - DELETE
+    - endpoint: api/aslan/project/variablesets
+      methods:
+        - POST
+    - endpoint: api/aslan/project/variablesets/?*
+      methods:
+        - PUT
+        - DELETE

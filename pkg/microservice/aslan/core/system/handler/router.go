@@ -155,6 +155,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	integration := router.Group("helm")
 	{
 		integration.GET("", ListHelmRepos)
+		integration.GET("/public", ListHelmReposPublic)
 		integration.POST("", CreateHelmRepo)
 		integration.PUT("/:id", UpdateHelmRepo)
 		integration.DELETE("/:id", DeleteHelmRepo)
@@ -243,5 +244,14 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		sonar.GET("/integration/:id", GetSonarIntegration)
 		sonar.DELETE("/integration/:id", DeleteSonarIntegration)
 		sonar.POST("/validate", ValidateSonarInformation)
+	}
+}
+
+type OpenAPIRouter struct{}
+
+func (*OpenAPIRouter) Inject(router *gin.RouterGroup) {
+	reg := router.Group("registry")
+	{
+		reg.POST("", OpenAPICreateRegistry)
 	}
 }

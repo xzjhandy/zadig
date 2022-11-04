@@ -248,19 +248,23 @@ const (
 	SourceFromGitlab = "gitlab"
 	// SourceFromGithub The configuration source is github
 	SourceFromGithub = "github"
-	// SourceFromGitlab The configuration source is gerrit
+	// SourceFromGerrit The configuration source is gerrit
 	SourceFromGerrit = "gerrit"
 	// SourceFromCodeHub The configuration source is codehub
 	SourceFromCodeHub = "codehub"
 	// SourceFromGitee Configure the source as gitee
 	SourceFromGitee = "gitee"
-	// SourceFromGitee Configure the source as other
+	// SourceFromGiteeEE Configure the source as gitee-enterprise
+	SourceFromGiteeEE = "gitee-enterprise"
+	// SourceFromOther Configure the source as other
 	SourceFromOther = "other"
 	// SourceFromChartTemplate The configuration source is helmTemplate
 	SourceFromChartTemplate = "chartTemplate"
 	// SourceFromPublicRepo The configuration source is publicRepo
-	SourceFromPublicRepo = "publicRepo"
-	SourceFromChartRepo  = "chartRepo"
+	SourceFromPublicRepo  = "publicRepo"
+	SourceFromChartRepo   = "chartRepo"
+	SourceFromCustomEdit  = "customEdit"
+	SourceFromVariableSet = "variableSet"
 
 	// SourceFromGUI The configuration source is gui
 	SourceFromGUI = "gui"
@@ -312,7 +316,7 @@ const (
 	AuthorizationHeader = "Authorization"
 )
 
-//install script constants
+// install script constants
 const (
 	StandardScriptName   = "install.sh"
 	AllInOneScriptName   = "install_with_k8s.sh"
@@ -328,7 +332,7 @@ const (
 	StatusSucceeded = "Succeeded"
 )
 
-//build image consts
+// build image consts
 const (
 	// BuildImageJob ...
 	BuildImageJob = "docker-build"
@@ -515,8 +519,9 @@ const (
 	FixedGapCronjob     = "gap"
 	CrontabCronjob      = "crontab"
 
-	WorkflowCronjob = "workflow"
-	TestingCronjob  = "test"
+	WorkflowCronjob   = "workflow"
+	WorkflowV4Cronjob = "workflow_v4"
+	TestingCronjob    = "test"
 
 	TopicProcess      = "task.process"
 	TopicCancel       = "task.cancel"
@@ -659,6 +664,7 @@ const UpdateEnvTimeout = 60 * 5 * time.Second
 // list namespace type
 const (
 	ListNamespaceTypeCreate = "create"
+	ListNamespaceTypeALL    = "all"
 )
 
 const (
@@ -688,4 +694,21 @@ const (
 	FixedValueMark            = "<+fixed>"
 	RenderValueTemplate       = "{{.%s}}"
 	RenderPluginValueTemplate = "$(%s)"
+)
+
+const (
+	// normal project names are not allowed to contain special characters, so we have a special project name to distinguish the enterprise workflow
+	EnterpriseProject = "DEPLOY_CENTER"
+)
+
+const (
+	ProductWorkflowType = "product_workflow"
+	CustomWorkflowType  = "common_workflow"
+)
+
+// cluster dodeAffinity schedule type
+const (
+	NormalSchedule    = "normal"
+	RequiredSchedule  = "required"
+	PreferredSchedule = "preferred"
 )

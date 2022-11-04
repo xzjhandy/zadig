@@ -130,11 +130,12 @@ type Context struct {
 	UploadInfo        []*types.ObjectStoragePathDetail `yaml:"upload_info"`
 
 	// scanner used flag
-	ScannerFlag    bool   `yaml:"scanner_flag"`
-	ScannerType    string `yaml:"scanner_type"`
-	SonarParameter string `yaml:"sonar_parameter"`
-	SonarServer    string `yaml:"sonar_server"`
-	SonarLogin     string `yaml:"sonar_login"`
+	ScannerFlag           bool   `yaml:"scanner_flag"`
+	ScannerType           string `yaml:"scanner_type"`
+	SonarParameter        string `yaml:"sonar_parameter"`
+	SonarServer           string `yaml:"sonar_server"`
+	SonarLogin            string `yaml:"sonar_login"`
+	SonarCheckQualityGate bool   `yaml:"sonar_check_quality_gate"`
 }
 
 type ArtifactInfo struct {
@@ -225,6 +226,7 @@ type Repo struct {
 	RemoteName         string         `yaml:"remote_name"`
 	Branch             string         `yaml:"branch"`
 	PR                 int            `yaml:"pr"`
+	PRs                []int          `yaml:"prs"`
 	Tag                string         `yaml:"tag"`
 	CheckoutPath       string         `yaml:"checkout_path"`
 	SubModules         bool           `yaml:"submodules"`

@@ -18,6 +18,7 @@ package reaper
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/koderover/zadig/pkg/tool/s3"
+	"github.com/koderover/zadig/pkg/tool/sonar"
 	"gopkg.in/yaml.v3"
 
 	"github.com/koderover/zadig/pkg/microservice/reaper/config"
@@ -178,7 +180,7 @@ func (r *Reaper) BeforeExec() error {
 	r.StartTime = time.Now()
 
 	// the execution preparation are not required, so we skip it if the reaper type is scanning
-	if r.Type != types.ScanningReaperType {
+	if r.Type != types.ScanningReaperType && r.Type != types.TestReaperType {
 		log.Infof("Checking Docker Connectivity.")
 		startTimeCheckDocker := time.Now()
 		for i := 0; i < 15; i++ {
@@ -204,55 +206,55 @@ func (r *Reaper) BeforeExec() error {
 				log.Infof("Login ended. Duration: %.2f seconds.", time.Since(startTimeDockerLogin).Seconds())
 			}
 		}
+	}
 
-		if r.Ctx.CacheEnable && r.Ctx.Cache.MediumType == types.ObjectMedium {
-			log.Info("Pulling Cache.")
-			startTimePullCache := time.Now()
-			if err := r.DecompressCache(); err != nil {
-				// If the workflow runs for the first time, there may be no cache.
-				log.Infof("Failed to pull cache: %s. Duration: %.2f seconds.", err, time.Since(startTimePullCache).Seconds())
-			} else {
-				log.Infof("Succeed to pull cache. Duration: %.2f seconds.", time.Since(startTimePullCache).Seconds())
-			}
+	if r.Ctx.CacheEnable && r.Ctx.Cache.MediumType == types.ObjectMedium {
+		log.Info("Pulling Cache.")
+		startTimePullCache := time.Now()
+		if err := r.DecompressCache(); err != nil {
+			// If the workflow runs for the first time, there may be no cache.
+			log.Infof("Failed to pull cache: %s. Duration: %.2f seconds.", err, time.Since(startTimePullCache).Seconds())
+		} else {
+			log.Infof("Succeed to pull cache. Duration: %.2f seconds.", time.Since(startTimePullCache).Seconds())
+		}
+	}
+
+	if err := os.MkdirAll(path.Join(os.Getenv("HOME"), "/.ssh"), os.ModePerm); err != nil {
+		return fmt.Errorf("create ssh folder error: %v", err)
+	}
+
+	if r.Ctx.Archive != nil && len(r.Ctx.Archive.Dir) > 0 {
+		if err := os.MkdirAll(r.Ctx.Archive.Dir, os.ModePerm); err != nil {
+			return fmt.Errorf("create DistDir error: %v", err)
+		}
+	}
+
+	if r.Ctx.Git != nil {
+		if err := r.Ctx.Git.WriteGithubSSHFile(); err != nil {
+			return fmt.Errorf("write github ssh file error: %v", err)
 		}
 
-		if err := os.MkdirAll(path.Join(os.Getenv("HOME"), "/.ssh"), os.ModePerm); err != nil {
-			return fmt.Errorf("create ssh folder error: %v", err)
+		if err := r.Ctx.Git.WriteGitlabSSHFile(); err != nil {
+			return fmt.Errorf("write gitlab ssh file error: %v", err)
 		}
 
-		if r.Ctx.Archive != nil && len(r.Ctx.Archive.Dir) > 0 {
-			if err := os.MkdirAll(r.Ctx.Archive.Dir, os.ModePerm); err != nil {
-				return fmt.Errorf("create DistDir error: %v", err)
-			}
+		if err := r.Ctx.Git.WriteKnownHostFile(); err != nil {
+			return fmt.Errorf("write known_host file error: %v", err)
 		}
 
-		if r.Ctx.Git != nil {
-			if err := r.Ctx.Git.WriteGithubSSHFile(); err != nil {
-				return fmt.Errorf("write github ssh file error: %v", err)
-			}
+		if err := r.Ctx.Git.WriteSSHConfigFile(r.Ctx.Proxy); err != nil {
+			return fmt.Errorf("write ssh config error: %v", err)
+		}
+	}
 
-			if err := r.Ctx.Git.WriteGitlabSSHFile(); err != nil {
-				return fmt.Errorf("write gitlab ssh file error: %v", err)
-			}
-
-			if err := r.Ctx.Git.WriteKnownHostFile(); err != nil {
-				return fmt.Errorf("write known_host file error: %v", err)
-			}
-
-			if err := r.Ctx.Git.WriteSSHConfigFile(r.Ctx.Proxy); err != nil {
-				return fmt.Errorf("write ssh config error: %v", err)
-			}
+	if r.Ctx.GinkgoTest != nil && len(r.Ctx.GinkgoTest.ResultPath) > 0 {
+		r.Ctx.GinkgoTest.ResultPath = filepath.Join(r.ActiveWorkspace, r.Ctx.GinkgoTest.ResultPath)
+		if err := os.RemoveAll(r.Ctx.GinkgoTest.ResultPath); err != nil {
+			log.Warning(err.Error())
 		}
 
-		if r.Ctx.GinkgoTest != nil && len(r.Ctx.GinkgoTest.ResultPath) > 0 {
-			r.Ctx.GinkgoTest.ResultPath = filepath.Join(r.ActiveWorkspace, r.Ctx.GinkgoTest.ResultPath)
-			if err := os.RemoveAll(r.Ctx.GinkgoTest.ResultPath); err != nil {
-				log.Warning(err.Error())
-			}
-
-			if err := os.MkdirAll(r.Ctx.GinkgoTest.ResultPath, os.ModePerm); err != nil {
-				return fmt.Errorf("create test result path error: %v", err)
-			}
+		if err := os.MkdirAll(r.Ctx.GinkgoTest.ResultPath, os.ModePerm); err != nil {
+			return fmt.Errorf("create test result path error: %v", err)
 		}
 	}
 
@@ -353,82 +355,133 @@ func (r *Reaper) prepareDockerfile() error {
 	return nil
 }
 
-func (r *Reaper) Exec() error {
+func (r *Reaper) Exec() (err error) {
 	log.Info("Installing Dependency Packages.")
 	startTimeInstallDeps := time.Now()
-	if err := r.runIntallationScripts(); err != nil {
-		return fmt.Errorf("failed to install dependency packages: %s", err)
+	if err = r.runIntallationScripts(); err != nil {
+		err = fmt.Errorf("failed to install dependency packages: %s", err)
+		return
 	}
 	log.Infof("Install ended. Duration: %.2f seconds.", time.Since(startTimeInstallDeps).Seconds())
 
 	log.Info("Cloning Repository.")
 	startTimeCloneRepo := time.Now()
-	if err := r.runGitCmds(); err != nil {
-		return fmt.Errorf("failed to clone repository: %s", err)
+	if err = r.runGitCmds(); err != nil {
+		err = fmt.Errorf("failed to clone repository: %s", err)
+		return
 	}
 	log.Infof("Clone ended. Duration: %.2f seconds.", time.Since(startTimeCloneRepo).Seconds())
 
-	if err := r.createReadme(ReadmeFile); err != nil {
+	if err = r.createReadme(ReadmeFile); err != nil {
 		log.Warningf("Failed to create README file: %s", err)
 	}
+	// collect test result regardless of excution result
+	defer func() {
+		collectErr := r.CollectTestResults()
+		if collectErr != nil {
+			err = collectErr
+		}
+	}()
+	log.Info("Executing User Build Script.")
+	startTimeRunBuildScript := time.Now()
+	if err = r.runScripts(); err != nil {
+		err = fmt.Errorf("failed to execute user build script: %s", err)
+		return
+	}
+	log.Infof("Execution ended. Duration: %.2f seconds.", time.Since(startTimeRunBuildScript).Seconds())
 
-	// for build/test/scanner of type other than sonar, we run the script
-	if !r.Ctx.ScannerFlag || r.Ctx.ScannerType != types.ScanningTypeSonar {
-		log.Info("Executing User Build Script.")
-		startTimeRunBuildScript := time.Now()
-		if err := r.runScripts(); err != nil {
-			return fmt.Errorf("failed to execute user build script: %s", err)
-		}
-		log.Infof("Execution ended. Duration: %.2f seconds.", time.Since(startTimeRunBuildScript).Seconds())
-	} else {
-		// for sonar type we write the sonar parameter into config file and go with sonar-scanner command
-		log.Info("Executing SonarQube Scanning process.")
-		startTimeRunSonar := time.Now()
-		if err := r.runSonarScanner(); err != nil {
-			return fmt.Errorf("failed to execute sonar scanning process, the error is: %s", err)
-		}
-		log.Infof("Sonar scan ended. Duration %.2f seconds.", time.Since(startTimeRunSonar).Seconds())
+	// for sonar type we write the sonar parameter into config file and go with sonar-scanner command
+	log.Info("Executing SonarQube Scanning process.")
+	startTimeRunSonar := time.Now()
+	if err = r.runSonarScanner(); err != nil {
+		err = fmt.Errorf("failed to execute sonar scanning process, the error is: %s", err)
+		return
+	}
+	log.Infof("Sonar scan ended. Duration %.2f seconds.", time.Since(startTimeRunSonar).Seconds())
+
+	err = r.runDockerBuild()
+	return
+}
+
+func (r *Reaper) CollectTestResults() error {
+	if r.Ctx.GinkgoTest == nil {
+		return nil
+	}
+	resultPath := r.Ctx.GinkgoTest.ResultPath
+	if resultPath != "" && !strings.HasPrefix(resultPath, "/") {
+		resultPath = filepath.Join(r.ActiveWorkspace, resultPath)
 	}
 
-	return r.runDockerBuild()
+	if r.Ctx.TestType == "" {
+		r.Ctx.TestType = setting.FunctionTest
+	}
+
+	switch r.Ctx.TestType {
+	case setting.FunctionTest:
+		err := mergeGinkgoTestResults(r.Ctx.Archive.File, resultPath, r.Ctx.Archive.Dir, r.StartTime)
+		if err != nil {
+			return fmt.Errorf("failed to merge test result: %s", err)
+		}
+	case setting.PerformanceTest:
+		err := JmeterTestResults(r.Ctx.Archive.File, resultPath, r.Ctx.Archive.Dir)
+		if err != nil {
+			return fmt.Errorf("failed to archive performance test result: %s", err)
+		}
+	}
+
+	if len(r.Ctx.GinkgoTest.ArtifactPaths) > 0 {
+		if err := artifactsUpload(r.Ctx, r.ActiveWorkspace, r.Ctx.GinkgoTest.ArtifactPaths); err != nil {
+			return fmt.Errorf("failed to upload artifacts: %s", err)
+		}
+	}
+
+	if err := r.archiveTestFiles(); err != nil {
+		return fmt.Errorf("failed to archive test files: %s", err)
+	}
+
+	if err := r.archiveHTMLTestReportFile(); err != nil {
+		return fmt.Errorf("failed to archive HTML test report: %s", err)
+	}
+	return nil
 }
 
 func (r *Reaper) AfterExec() error {
-	if r.Ctx.GinkgoTest != nil {
-		resultPath := r.Ctx.GinkgoTest.ResultPath
-		if resultPath != "" && !strings.HasPrefix(resultPath, "/") {
-			resultPath = filepath.Join(r.ActiveWorkspace, resultPath)
+	if r.Ctx.ScannerFlag && r.Ctx.ScannerType == types.ScanningTypeSonar && r.Ctx.SonarCheckQualityGate {
+		log.Info("Start check Sonar scanning quality gate status.")
+		client := sonar.NewSonarClient(r.Ctx.SonarServer, r.Ctx.SonarLogin)
+		sonarWorkDir := sonar.GetSonarWorkDir(r.Ctx.SonarParameter)
+		if sonarWorkDir == "" {
+			sonarWorkDir = ".scannerwork"
 		}
-
-		if r.Ctx.TestType == "" {
-			r.Ctx.TestType = setting.FunctionTest
+		if !filepath.IsAbs(sonarWorkDir) {
+			sonarWorkDir = filepath.Join("/workspace", r.Ctx.Repos[0].Name, sonarWorkDir)
 		}
-
-		switch r.Ctx.TestType {
-		case setting.FunctionTest:
-			err := mergeGinkgoTestResults(r.Ctx.Archive.File, resultPath, r.Ctx.Archive.Dir, r.StartTime)
-			if err != nil {
-				return fmt.Errorf("failed to merge test result: %s", err)
-			}
-		case setting.PerformanceTest:
-			err := JmeterTestResults(r.Ctx.Archive.File, resultPath, r.Ctx.Archive.Dir)
-			if err != nil {
-				return fmt.Errorf("failed to archive performance test result: %s", err)
-			}
+		taskReportDir := filepath.Join(sonarWorkDir, "report-task.txt")
+		bytes, err := ioutil.ReadFile(taskReportDir)
+		if err != nil {
+			log.Errorf("read sonar task report file: %s error :%v", taskReportDir, err)
+			return err
 		}
-
-		if len(r.Ctx.GinkgoTest.ArtifactPaths) > 0 {
-			if err := artifactsUpload(r.Ctx, r.ActiveWorkspace, r.Ctx.GinkgoTest.ArtifactPaths); err != nil {
-				return fmt.Errorf("failed to upload artifacts: %s", err)
-			}
+		taskReportContent := string(bytes)
+		ceTaskID := sonar.GetSonarCETaskID(taskReportContent)
+		if ceTaskID == "" {
+			log.Error("can not get sonar ce task ID")
+			return errors.New("can not get sonar ce task ID")
 		}
-
-		if err := r.archiveTestFiles(); err != nil {
-			return fmt.Errorf("failed to archive test files: %s", err)
+		analysisID, err := client.WaitForCETaskTobeDone(ceTaskID, time.Minute*10)
+		if err != nil {
+			log.Error(err)
+			return err
 		}
-
-		if err := r.archiveHTMLTestReportFile(); err != nil {
-			return fmt.Errorf("failed to archive HTML test report: %s", err)
+		gateInfo, err := client.GetQualityGateInfo(analysisID)
+		if err != nil {
+			log.Error(err)
+			return err
+		}
+		log.Infof("Sonar quality gate status: %s", gateInfo.ProjectStatus.Status)
+		sonar.PrintSonarConditionTables(gateInfo.ProjectStatus.Conditions)
+		if gateInfo.ProjectStatus.Status != sonar.QualityGateOK && gateInfo.ProjectStatus.Status != sonar.QualityGateNone {
+			return fmt.Errorf("sonar quality gate status was: %s", gateInfo.ProjectStatus.Status)
 		}
 	}
 

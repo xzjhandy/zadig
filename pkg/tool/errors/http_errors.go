@@ -705,6 +705,7 @@ var (
 	//-----------------------------------------------------------------------------------------------
 	ErrListHelmReleases = NewHTTPError(6850, "获取release失败")
 	ErrGetHelmCharts    = NewHTTPError(6851, "获取chart信息失败")
+	ErrEditHelmCharts   = NewHTTPError(6852, "更新chart信息失败")
 
 	//-----------------------------------------------------------------------------------------------
 	// plugins releated Error Range: 6870 - 6879
@@ -721,4 +722,22 @@ var (
 	ErrCreateWebhook = NewHTTPError(6882, "创建webhook失败")
 	ErrUpdateWebhook = NewHTTPError(6883, "更新webhook失败")
 	ErrDeleteWebhook = NewHTTPError(6884, "删除webhook失败")
+
+	//-----------------------------------------------------------------------------------------------
+	// workflow view releated Error Range: 6890 - 6899
+	//-----------------------------------------------------------------------------------------------
+	ErrGetView    = NewHTTPError(6890, "获取视图详情失败")
+	ErrListView   = NewHTTPError(6891, "列出视图失败")
+	ErrCreateView = NewHTTPError(6892, "创建视图失败")
+	ErrUpdateView = NewHTTPError(6893, "更新视图失败")
+	ErrDeleteView = NewHTTPError(6894, "删除视图失败")
+
+	//-----------------------------------------------------------------------------------------------
+	// VariableSet releated errors: 6900-6909
+	//-----------------------------------------------------------------------------------------------
+	ErrListVariableSets  = NewHTTPError(6900, "列出变量集失败")
+	ErrGetVariableSet    = NewHTTPError(6901, "获取变量集详情失败")
+	ErrEditVariableSet   = NewHTTPError(6902, "编辑变量集失败")
+	ErrDeleteVariableSet = NewHTTPError(6903, "删除变量集失败")
+	ErrCreateVariableSet = NewHTTPError(6904, "创建变量集失败")
 )

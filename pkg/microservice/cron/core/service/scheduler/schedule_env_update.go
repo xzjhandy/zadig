@@ -29,8 +29,10 @@ import (
 const EnvUpdateInterval = 30
 
 func needCreateSchedule(rendersetObj *service.ProductRenderset) bool {
-	if rendersetObj.YamlData != nil && rendersetObj.YamlData.Source == setting.SourceFromGitRepo {
-		return true
+	if rendersetObj.YamlData != nil {
+		if rendersetObj.YamlData.Source == setting.SourceFromGitRepo || rendersetObj.YamlData.Source == setting.SourceFromVariableSet {
+			return true
+		}
 	}
 	for _, chartData := range rendersetObj.ChartInfos {
 		if chartData.OverrideYaml != nil && chartData.OverrideYaml.Source == setting.SourceFromGitRepo {
@@ -43,7 +45,7 @@ func needCreateSchedule(rendersetObj *service.ProductRenderset) bool {
 func (c *CronClient) UpsertEnvValueSyncScheduler(log *zap.SugaredLogger) {
 	envs, err := c.AslanCli.ListEnvs(log, &client.EvnListOption{DeployType: []string{setting.HelmDeployType}})
 	if err != nil {
-		log.Error(err)
+		log.Errorf("failed to list envs for env values sync: %s", err)
 		return
 	}
 

@@ -30,6 +30,7 @@ import (
 type Workflow struct {
 	ID              primitive.ObjectID `bson:"_id,omitempty"                json:"id,omitempty"`
 	Name            string             `bson:"name"                         json:"name"`
+	DisplayName     string             `bson:"display_name"                 json:"display_name"`
 	Enabled         bool               `bson:"enabled"                      json:"enabled"`
 	ProductTmplName string             `bson:"product_tmpl_name"            json:"product_tmpl_name"`
 	Team            string             `bson:"team,omitempty"               json:"team,omitempty"`
@@ -115,17 +116,18 @@ type ScheduleCtrl struct {
 }
 
 type Schedule struct {
-	ID           primitive.ObjectID  `bson:"_id,omitempty"                 json:"id,omitempty"`
-	Number       uint64              `bson:"number"                        json:"number"`
-	Frequency    string              `bson:"frequency"                     json:"frequency"`
-	Time         string              `bson:"time"                          json:"time"`
-	MaxFailures  int                 `bson:"max_failures,omitempty"        json:"max_failures,omitempty"`
-	TaskArgs     *TaskArgs           `bson:"task_args,omitempty"           json:"task_args,omitempty"`
-	WorkflowArgs *WorkflowTaskArgs   `bson:"workflow_args,omitempty"       json:"workflow_args,omitempty"`
-	TestArgs     *TestTaskArgs       `bson:"test_args,omitempty"           json:"test_args,omitempty"`
-	Type         config.ScheduleType `bson:"type"                          json:"type"`
-	Cron         string              `bson:"cron"                          json:"cron"`
-	IsModified   bool                `bson:"-"                             json:"-"`
+	ID             primitive.ObjectID  `bson:"_id,omitempty"                 json:"id,omitempty"`
+	Number         uint64              `bson:"number"                        json:"number"`
+	Frequency      string              `bson:"frequency"                     json:"frequency"`
+	Time           string              `bson:"time"                          json:"time"`
+	MaxFailures    int                 `bson:"max_failures,omitempty"        json:"max_failures,omitempty"`
+	TaskArgs       *TaskArgs           `bson:"task_args,omitempty"           json:"task_args,omitempty"`
+	WorkflowArgs   *WorkflowTaskArgs   `bson:"workflow_args,omitempty"       json:"workflow_args,omitempty"`
+	TestArgs       *TestTaskArgs       `bson:"test_args,omitempty"           json:"test_args,omitempty"`
+	WorkflowV4Args *WorkflowV4         `bson:"workflow_v4_args"              json:"workflow_v4_args"`
+	Type           config.ScheduleType `bson:"type"                          json:"type"`
+	Cron           string              `bson:"cron"                          json:"cron"`
+	IsModified     bool                `bson:"-"                             json:"-"`
 	// 自由编排工作流的开关是放在schedule里面的
 	Enabled bool `bson:"enabled"                       json:"enabled"`
 }
@@ -315,14 +317,16 @@ type ProductDistribute struct {
 }
 
 type NotifyCtl struct {
-	Enabled         bool     `bson:"enabled"                          json:"enabled"`
-	WebHookType     string   `bson:"webhook_type"                     json:"webhook_type"`
-	WeChatWebHook   string   `bson:"weChat_webHook,omitempty"         json:"weChat_webHook,omitempty"`
-	DingDingWebHook string   `bson:"dingding_webhook,omitempty"       json:"dingding_webhook,omitempty"`
-	FeiShuWebHook   string   `bson:"feishu_webhook,omitempty"         json:"feishu_webhook,omitempty"`
-	AtMobiles       []string `bson:"at_mobiles,omitempty"             json:"at_mobiles,omitempty"`
-	IsAtAll         bool     `bson:"is_at_all,omitempty"              json:"is_at_all,omitempty"`
-	NotifyTypes     []string `bson:"notify_type"                      json:"notify_type"`
+	Enabled         bool     `bson:"enabled"                       yaml:"enabled"                       json:"enabled"`
+	WebHookType     string   `bson:"webhook_type"                  yaml:"webhook_type"                  json:"webhook_type"`
+	WeChatWebHook   string   `bson:"weChat_webHook,omitempty"      yaml:"weChat_webHook,omitempty"      json:"weChat_webHook,omitempty"`
+	DingDingWebHook string   `bson:"dingding_webhook,omitempty"    yaml:"dingding_webhook,omitempty"    json:"dingding_webhook,omitempty"`
+	FeiShuWebHook   string   `bson:"feishu_webhook,omitempty"      yaml:"feishu_webhook,omitempty"      json:"feishu_webhook,omitempty"`
+	AtMobiles       []string `bson:"at_mobiles,omitempty"          yaml:"at_mobiles,omitempty"          json:"at_mobiles,omitempty"`
+	WechatUserIDs   []string `bson:"wechat_user_ids,omitempty"     yaml:"wechat_user_ids,omitempty"     json:"wechat_user_ids,omitempty"`
+	LarkUserIDs     []string `bson:"lark_user_ids,omitempty"       yaml:"lark_user_ids,omitempty"       json:"lark_user_ids,omitempty"`
+	IsAtAll         bool     `bson:"is_at_all,omitempty"           yaml:"is_at_all,omitempty"           json:"is_at_all,omitempty"`
+	NotifyTypes     []string `bson:"notify_type"                   yaml:"notify_type"                   json:"notify_type"`
 }
 
 type TaskInfo struct {
@@ -446,7 +450,7 @@ func (d *DistributeStage) IsDistributeS3Enabled() bool {
 	return false
 }
 
-//Validate validate schedule setting
+// Validate validate schedule setting
 func (schedule *Schedule) Validate() error {
 	switch schedule.Type {
 	case config.TimingSchedule:

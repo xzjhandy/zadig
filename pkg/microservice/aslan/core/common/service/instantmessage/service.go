@@ -19,6 +19,7 @@ package instantmessage
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"text/template"
@@ -52,31 +53,36 @@ const (
 )
 
 type Service struct {
-	proxyColl        *mongodb.ProxyColl
-	workflowColl     *mongodb.WorkflowColl
-	pipelineColl     *mongodb.PipelineColl
-	testingColl      *mongodb.TestingColl
-	testTaskStatColl *mongodb.TestTaskStatColl
+	proxyColl          *mongodb.ProxyColl
+	workflowColl       *mongodb.WorkflowColl
+	pipelineColl       *mongodb.PipelineColl
+	testingColl        *mongodb.TestingColl
+	testTaskStatColl   *mongodb.TestTaskStatColl
+	workflowV4Coll     *mongodb.WorkflowV4Coll
+	workflowTaskV4Coll *mongodb.WorkflowTaskv4Coll
 }
 
 func NewWeChatClient() *Service {
 	return &Service{
-		proxyColl:        mongodb.NewProxyColl(),
-		workflowColl:     mongodb.NewWorkflowColl(),
-		pipelineColl:     mongodb.NewPipelineColl(),
-		testingColl:      mongodb.NewTestingColl(),
-		testTaskStatColl: mongodb.NewTestTaskStatColl(),
+		proxyColl:          mongodb.NewProxyColl(),
+		workflowColl:       mongodb.NewWorkflowColl(),
+		pipelineColl:       mongodb.NewPipelineColl(),
+		testingColl:        mongodb.NewTestingColl(),
+		testTaskStatColl:   mongodb.NewTestTaskStatColl(),
+		workflowV4Coll:     mongodb.NewWorkflowV4Coll(),
+		workflowTaskV4Coll: mongodb.NewworkflowTaskv4Coll(),
 	}
 }
 
 type wechatNotification struct {
-	Task        *task.Task `json:"task"`
-	BaseURI     string     `json:"base_uri"`
-	IsSingle    bool       `json:"is_single"`
-	WebHookType string     `json:"web_hook_type"`
-	TotalTime   int64      `json:"total_time"`
-	AtMobiles   []string   `json:"atMobiles"`
-	IsAtAll     bool       `json:"is_at_all"`
+	Task               *task.Task `json:"task"`
+	EncodedDisplayName string     `json:"encoded_display_name"`
+	BaseURI            string     `json:"base_uri"`
+	IsSingle           bool       `json:"is_single"`
+	WebHookType        string     `json:"web_hook_type"`
+	TotalTime          int64      `json:"total_time"`
+	AtMobiles          []string   `json:"atMobiles"`
+	IsAtAll            bool       `json:"is_at_all"`
 }
 
 func (w *Service) SendMessageRequest(uri string, message interface{}) ([]byte, error) {
@@ -200,7 +206,7 @@ func (w *Service) sendMessage(task *task.Task, notifyCtl *models.NotifyCtl, test
 				TotalTime:   time.Now().Unix() - task.StartTime,
 				AtMobiles:   atMobiles,
 				IsAtAll:     isAtAll,
-			})
+			}, notifyCtl)
 			if err != nil {
 				log.Errorf("workflow createNotifyBodyOfWorkflowIM err :%s", err)
 				return err
@@ -227,7 +233,7 @@ func (w *Service) sendMessage(task *task.Task, notifyCtl *models.NotifyCtl, test
 				TotalTime:   time.Now().Unix() - task.StartTime,
 				AtMobiles:   atMobiles,
 				IsAtAll:     isAtAll,
-			})
+			}, notifyCtl)
 			if err != nil {
 				log.Errorf("testing createNotifyBodyOfTestIM err :%s", err)
 				return err
@@ -258,6 +264,10 @@ func (w *Service) sendMessage(task *task.Task, notifyCtl *models.NotifyCtl, test
 			err := w.sendFeishuMessage(uri, larkCard)
 			if err != nil {
 				log.Errorf("SendFeiShuMessageRequest err : %s", err)
+				return err
+			}
+			if err := w.sendFeishuMessageOfSingleType("", notifyCtl.FeiShuWebHook, getNotifyAtContent(notifyCtl)); err != nil {
+				log.Errorf("SendFeiShu @ message err : %s", err)
 				return err
 			}
 		} else {
@@ -305,10 +315,12 @@ func (w *Service) createNotifyBody(weChatNotification *wechatNotification) (cont
 	return tplcontent, err
 }
 
-func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotification) (string, string, *LarkCard, error) {
-	tplTitle := "{{if ne .WebHookType \"feishu\"}}#### {{end}}{{getIcon .Task.Status }}{{if eq .WebHookType \"wechat\"}}<font color=\"{{ getColor .Task.Status }}\">工作流{{.Task.PipelineName}} #{{.Task.TaskID}} {{ taskStatus .Task.Status }}</font>{{else}}工作流 {{.Task.PipelineName}} #{{.Task.TaskID}} {{ taskStatus .Task.Status }}{{end}} \n"
+func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotification, notify *models.NotifyCtl) (string, string, *LarkCard, error) {
+	weChatNotification.EncodedDisplayName = url.PathEscape(weChatNotification.Task.PipelineDisplayName)
+	tplTitle := "{{if ne .WebHookType \"feishu\"}}#### {{end}}{{getIcon .Task.Status }}{{if eq .WebHookType \"wechat\"}}<font color=\"{{ getColor .Task.Status }}\">工作流{{.Task.PipelineDisplayName}} #{{.Task.TaskID}} {{ taskStatus .Task.Status }}</font>{{else}}工作流 {{.Task.PipelineDisplayName}} #{{.Task.TaskID}} {{ taskStatus .Task.Status }}{{end}} \n"
 	tplBaseInfo := []string{"{{if eq .WebHookType \"dingding\"}}##### {{end}}**执行用户**：{{.Task.TaskCreator}} \n",
 		"{{if eq .WebHookType \"dingding\"}}##### {{end}}**环境信息**：{{.Task.WorkflowArgs.Namespace}} \n",
+		"{{if eq .WebHookType \"dingding\"}}##### {{end}}**项目名称**：{{.Task.ProductName}} \n",
 		"{{if eq .WebHookType \"dingding\"}}##### {{end}}**开始时间**：{{ getStartTime .Task.StartTime}} \n",
 		"{{if eq .WebHookType \"dingding\"}}##### {{end}}**持续时间**：{{ getDuration .TotalTime}} \n",
 	}
@@ -379,7 +391,7 @@ func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotific
 	}
 
 	buttonContent := "点击查看更多信息"
-	workflowDetailURL := "{{.BaseURI}}/v1/projects/detail/{{.Task.ProductName}}/pipelines/{{ isSingle .IsSingle }}/{{.Task.PipelineName}}/{{.Task.TaskID}}"
+	workflowDetailURL := "{{.BaseURI}}/v1/projects/detail/{{.Task.ProductName}}/pipelines/{{ isSingle .IsSingle }}/{{.Task.PipelineName}}/{{.Task.TaskID}}?display_name={{.EncodedDisplayName}}"
 	moreInformation := fmt.Sprintf("[%s](%s)", buttonContent, workflowDetailURL)
 	tplTitle, _ = getTplExec(tplTitle, weChatNotification)
 
@@ -387,11 +399,7 @@ func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotific
 		tplcontent := strings.Join(tplBaseInfo, "")
 		tplcontent += strings.Join(build, "")
 		tplcontent = fmt.Sprintf("%s%s", tplcontent, test)
-		if weChatNotification.WebHookType == dingDingType {
-			if len(weChatNotification.AtMobiles) > 0 && !weChatNotification.IsAtAll {
-				tplcontent = fmt.Sprintf("%s{{if eq .WebHookType \"dingding\"}}##### {{end}}**相关人员**：@%s \n", tplcontent, strings.Join(weChatNotification.AtMobiles, "@"))
-			}
-		}
+		tplcontent = tplcontent + getNotifyAtContent(notify)
 		tplcontent = fmt.Sprintf("%s%s%s", tplTitle, tplcontent, moreInformation)
 		tplExecContent, _ := getTplExec(tplcontent, weChatNotification)
 		return tplTitle, tplExecContent, nil, nil
@@ -417,10 +425,11 @@ func (w *Service) createNotifyBodyOfWorkflowIM(weChatNotification *wechatNotific
 	return "", "", lc, nil
 }
 
-func (w *Service) createNotifyBodyOfTestIM(desc string, weChatNotification *wechatNotification) (string, string, *LarkCard, error) {
+func (w *Service) createNotifyBodyOfTestIM(desc string, weChatNotification *wechatNotification, notify *models.NotifyCtl) (string, string, *LarkCard, error) {
 
 	tplTitle := "{{if ne .WebHookType \"feishu\"}}#### {{end}}{{getIcon .Task.Status }}{{if eq .WebHookType \"wechat\"}}<font color=\"{{ getColor .Task.Status }}\">工作流{{.Task.PipelineName}} #{{.Task.TaskID}} {{ taskStatus .Task.Status }}</font>{{else}}工作流 {{.Task.PipelineName}} #{{.Task.TaskID}} {{ taskStatus .Task.Status }}{{end}} \n"
 	tplBaseInfo := []string{"{{if eq .WebHookType \"dingding\"}}##### {{end}}**执行用户**：{{.Task.TaskCreator}} \n",
+		"{{if eq .WebHookType \"dingding\"}}##### {{end}}**项目名称**：{{.Task.ProductName}} \n",
 		"{{if eq .WebHookType \"dingding\"}}##### {{end}}**持续时间**：{{ getDuration .TotalTime}} \n",
 		"{{if eq .WebHookType \"dingding\"}}##### {{end}}**开始时间**：{{ getStartTime .Task.StartTime}} \n",
 		"{{if eq .WebHookType \"dingding\"}}##### {{end}}**测试描述**：" + desc + " \n",
@@ -445,11 +454,7 @@ func (w *Service) createNotifyBodyOfTestIM(desc string, weChatNotification *wech
 	if weChatNotification.WebHookType != feiShuType {
 		tplcontent := strings.Join(tplBaseInfo, "")
 		tplcontent = fmt.Sprintf("%s%s", tplcontent, tplTestCaseInfo)
-		if weChatNotification.WebHookType == dingDingType {
-			if len(weChatNotification.AtMobiles) > 0 && !weChatNotification.IsAtAll {
-				tplcontent = fmt.Sprintf("%s{{if eq .WebHookType \"dingding\"}}##### {{end}}**相关人员**：@%s \n", tplcontent, strings.Join(weChatNotification.AtMobiles, "@"))
-			}
-		}
+		tplcontent = tplcontent + getNotifyAtContent(notify)
 		tplcontent = fmt.Sprintf("%s%s%s", tplTitle, tplcontent, moreInformation)
 		tplExecContent, _ := getTplExec(tplcontent, weChatNotification)
 		return tplTitle, tplExecContent, nil, nil
@@ -602,4 +607,31 @@ func genTestCaseText(test string, subTask, testReports map[string]interface{}) s
 		test += fmt.Sprintf("%d(成功)%d(失败)%d(总数) \n", successNum, failedNum, totalNum)
 	}
 	return test
+}
+
+func getNotifyAtContent(notify *models.NotifyCtl) string {
+	resp := ""
+	if notify.WebHookType == dingDingType {
+		if len(notify.AtMobiles) > 0 && !notify.IsAtAll {
+			resp = fmt.Sprintf("##### **相关人员**: @%s \n", strings.Join(notify.AtMobiles, "@"))
+		}
+	}
+	if notify.WebHookType == weChatWorkType && len(notify.WechatUserIDs) > 0 {
+		atUserList := []string{}
+		for _, userID := range notify.WechatUserIDs {
+			atUserList = append(atUserList, fmt.Sprintf("<@%s>", userID))
+		}
+		resp = fmt.Sprintf("##### **相关人员**: %s \n", strings.Join(atUserList, " "))
+	}
+	if notify.WebHookType == feiShuType {
+		atUserList := []string{}
+		for _, userID := range notify.LarkUserIDs {
+			atUserList = append(atUserList, fmt.Sprintf("<at user_id=\"%s\"></at>", userID))
+		}
+		resp = strings.Join(atUserList, " ")
+		if notify.IsAtAll {
+			resp = "<at user_id=\"all\"></at>"
+		}
+	}
+	return resp
 }

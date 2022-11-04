@@ -78,7 +78,9 @@ func (s *GitStep) RunGitGc(folder string) error {
 }
 
 func (s *GitStep) runGitCmds() error {
-
+	if err := os.MkdirAll(path.Join(config.Home(), "/.ssh"), os.ModePerm); err != nil {
+		return fmt.Errorf("create ssh folder error: %v", err)
+	}
 	envs := s.envs
 	// 如果存在github代码库，则设置代理，同时保证非github库不走代理
 	if s.spec.Proxy != nil && s.spec.Proxy.EnableRepoProxy && s.spec.Proxy.Type == "http" {
@@ -228,8 +230,9 @@ func (s *GitStep) buildGitCommands(repo *types.Repository, hostNames sets.String
 	}
 	if repo.Source == types.ProviderGitlab {
 		u, _ := url.Parse(repo.Address)
+		host := strings.TrimSuffix(strings.Join([]string{u.Host, u.Path}, "/"), "/")
 		cmds = append(cmds, &c.Command{
-			Cmd:          c.RemoteAdd(repo.RemoteName, OAuthCloneURL(repo.Source, repo.OauthToken, u.Host, owner, repo.RepoName, u.Scheme)),
+			Cmd:          c.RemoteAdd(repo.RemoteName, OAuthCloneURL(repo.Source, repo.OauthToken, host, owner, repo.RepoName, u.Scheme)),
 			DisableTrace: true,
 		})
 	} else if repo.Source == types.ProviderGerrit {
@@ -243,13 +246,14 @@ func (s *GitStep) buildGitCommands(repo *types.Repository, hostNames sets.String
 		})
 	} else if repo.Source == types.ProviderCodehub {
 		u, _ := url.Parse(repo.Address)
+		host := strings.TrimSuffix(strings.Join([]string{u.Host, u.Path}, "/"), "/")
 		user := url.QueryEscape(repo.Username)
 		cmds = append(cmds, &c.Command{
-			Cmd:          c.RemoteAdd(repo.RemoteName, fmt.Sprintf("%s://%s:%s@%s/%s/%s.git", u.Scheme, user, repo.Password, u.Host, owner, repo.RepoName)),
+			Cmd:          c.RemoteAdd(repo.RemoteName, fmt.Sprintf("%s://%s:%s@%s/%s/%s.git", u.Scheme, user, repo.Password, host, owner, repo.RepoName)),
 			DisableTrace: true,
 		})
-	} else if repo.Source == types.ProviderGitee {
-		cmds = append(cmds, &c.Command{Cmd: c.RemoteAdd(repo.RemoteName, HTTPSCloneURL(repo.Source, repo.OauthToken, repo.RepoOwner, repo.RepoName)), DisableTrace: true})
+	} else if repo.Source == types.ProviderGitee || repo.Source == types.ProviderGiteeEE {
+		cmds = append(cmds, &c.Command{Cmd: c.RemoteAdd(repo.RemoteName, HTTPSCloneURL(repo.Source, repo.OauthToken, repo.RepoOwner, repo.RepoName, repo.Address)), DisableTrace: true})
 	} else if repo.Source == types.ProviderOther {
 		if repo.AuthType == types.SSHAuthType {
 			host := getHost(repo.Address)
@@ -273,15 +277,16 @@ func (s *GitStep) buildGitCommands(repo *types.Repository, hostNames sets.String
 			if err != nil {
 				log.Errorf("failed to parse url,err:%s", err)
 			} else {
+				host := strings.TrimSuffix(strings.Join([]string{u.Host, u.Path}, "/"), "/")
 				cmds = append(cmds, &c.Command{
-					Cmd:          c.RemoteAdd(repo.RemoteName, OAuthCloneURL(repo.Source, repo.PrivateAccessToken, u.Host, repo.RepoOwner, repo.RepoName, u.Scheme)),
+					Cmd:          c.RemoteAdd(repo.RemoteName, OAuthCloneURL(repo.Source, repo.PrivateAccessToken, host, repo.RepoOwner, repo.RepoName, u.Scheme)),
 					DisableTrace: true,
 				})
 			}
 		}
 	} else {
 		// github
-		cmds = append(cmds, &c.Command{Cmd: c.RemoteAdd(repo.RemoteName, HTTPSCloneURL(repo.Source, repo.OauthToken, owner, repo.RepoName)), DisableTrace: true})
+		cmds = append(cmds, &c.Command{Cmd: c.RemoteAdd(repo.RemoteName, HTTPSCloneURL(repo.Source, repo.OauthToken, owner, repo.RepoName, "")), DisableTrace: true})
 	}
 
 	ref := repo.Ref()
@@ -292,16 +297,21 @@ func (s *GitStep) buildGitCommands(repo *types.Repository, hostNames sets.String
 	cmds = append(cmds, &c.Command{Cmd: c.Fetch(repo.RemoteName, ref)}, &c.Command{Cmd: c.CheckoutHead()})
 
 	// PR rebase branch 请求
-	if repo.PR > 0 && len(repo.Branch) > 0 {
-		newBranch := fmt.Sprintf("pr%d", repo.PR)
-		ref := fmt.Sprintf("%s:%s", repo.PRRef(), newBranch)
+	if len(repo.PRs) > 0 && len(repo.Branch) > 0 {
 		cmds = append(
 			cmds,
 			&c.Command{Cmd: c.DeepenedFetch(repo.RemoteName, repo.BranchRef())},
 			&c.Command{Cmd: c.ResetMerge()},
-			&c.Command{Cmd: c.DeepenedFetch(repo.RemoteName, ref)},
-			&c.Command{Cmd: c.Merge(newBranch)},
 		)
+		for _, pr := range repo.PRs {
+			newBranch := fmt.Sprintf("pr%d", pr)
+			ref := fmt.Sprintf("%s:%s", repo.PRRefByPRID(pr), newBranch)
+			cmds = append(
+				cmds,
+				&c.Command{Cmd: c.DeepenedFetch(repo.RemoteName, ref)},
+				&c.Command{Cmd: c.Merge(newBranch)},
+			)
+		}
 	}
 
 	if repo.SubModules {
@@ -356,7 +366,7 @@ func getHost(address string) string {
 
 // SSHCloneURL returns Oauth clone url
 // e.g.
-//https://oauth2:ACCESS_TOKEN@somegitlab.com/owner/name.git
+// https://oauth2:ACCESS_TOKEN@somegitlab.com/owner/name.git
 func OAuthCloneURL(source, token, address, owner, name, scheme string) string {
 	if strings.ToLower(source) == types.ProviderGitlab || strings.ToLower(source) == types.ProviderOther {
 		// address 需要传过来
@@ -367,11 +377,10 @@ func OAuthCloneURL(source, token, address, owner, name, scheme string) string {
 }
 
 // HTTPSCloneURL returns HTTPS clone url
-func HTTPSCloneURL(source, token, owner, name string) string {
-	if strings.ToLower(source) == types.ProviderGitlab {
-		return fmt.Sprintf("https://%s/%s/%s.git", "gitlab.koderover.com", owner, name)
-	} else if strings.ToLower(source) == types.ProviderGitee {
-		return fmt.Sprintf("https://%s:%s@%s/%s/%s.git", step.OauthTokenPrefix, token, "gitee.com", owner, name)
+func HTTPSCloneURL(source, token, owner, name string, optionalGiteeAddr string) string {
+	if strings.ToLower(source) == types.ProviderGitee || strings.ToLower(source) == types.ProviderGiteeEE {
+		addrSegment := strings.Split(optionalGiteeAddr, "://")
+		return fmt.Sprintf("%s://%s:%s@%s/%s/%s.git", addrSegment[0], step.OauthTokenPrefix, token, addrSegment[1], owner, name)
 	}
 	//return fmt.Sprintf("https://x-access-token:%s@%s/%s/%s.git", g.GetInstallationToken(owner), g.GetGithubHost(), owner, name)
 	return fmt.Sprintf("https://x-access-token:%s@%s/%s/%s.git", token, "github.com", owner, name)

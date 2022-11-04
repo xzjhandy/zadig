@@ -29,19 +29,30 @@ import (
 	"github.com/koderover/zadig/pkg/tool/httpclient"
 )
 
-const (
-	GiteeHOSTURL = "https://gitee.com/api"
-)
-
 type Project struct {
-	ID            int    `json:"id"`
-	Name          string `json:"name"`
-	DefaultBranch string `json:"default_branch,omitempty"`
+	ID            int            `json:"id"`
+	Name          string         `json:"name"`
+	DefaultBranch string         `json:"default_branch,omitempty"`
+	Namespace     *NamespaceInfo `json:"namespace,omitempty"`
 }
 
-func (c *Client) ListRepositoriesForAuthenticatedUser(accessToken, keyword string, page, perPage int) ([]Project, error) {
+type NamespaceInfo struct {
+	Parent *ParentInfo `json:"parent"`
+	Type   string      `json:"type"`
+	Path   string      `json:"path"`
+}
+
+type ParentInfo struct {
+	ID   int    `json:"id"`
+	Type string `json:"type"`
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+func (c *Client) ListRepositoriesForAuthenticatedUser(hostURL, accessToken, keyword string, page, perPage int) ([]Project, error) {
+	apiHost := fmt.Sprintf("%s/%s", hostURL, "api")
 	httpClient := httpclient.New(
-		httpclient.SetHostURL(GiteeHOSTURL),
+		httpclient.SetHostURL(apiHost),
 	)
 	// api reference: https://gitee.com/api/v5/swagger#/getV5UserRepos
 	url := "/v5/user/repos"
@@ -63,17 +74,20 @@ func (c *Client) ListRepositoriesForAuthenticatedUser(accessToken, keyword strin
 	return projects, nil
 }
 
-func (c *Client) ListRepositoriesForOrg(accessToken, org string, page, perPage int) ([]Project, error) {
+func (c *Client) ListRepositoryForEnterprise(hostURL, accessToken, enterprise string, page, perPage int) ([]Project, error) {
+	apiHost := fmt.Sprintf("%s/%s", hostURL, "api")
 	httpClient := httpclient.New(
-		httpclient.SetHostURL(GiteeHOSTURL),
+		httpclient.SetHostURL(apiHost),
 	)
-	// api reference: https://gitee.com/api/v5/swagger#/getV5OrgsOrgRepos
-	url := fmt.Sprintf("/v5/orgs/%s/repos", org)
+
+	// enterprise api reference: https://gitee.com/api/v5/swagger#/getV5EnterprisesEnterpriseRepos
+	url := fmt.Sprintf("/v5/enterprises/%s/repos", enterprise)
 	queryParams := make(map[string]string)
 	queryParams["access_token"] = accessToken
 	queryParams["type"] = "all"
 	queryParams["page"] = strconv.Itoa(page)
 	queryParams["per_page"] = strconv.Itoa(perPage)
+	queryParams["direct"] = "false"
 
 	var projects []Project
 	_, err := httpClient.Get(url, httpclient.SetQueryParams(queryParams), httpclient.SetResult(&projects))
@@ -82,6 +96,50 @@ func (c *Client) ListRepositoriesForOrg(accessToken, org string, page, perPage i
 	}
 
 	return projects, nil
+}
+
+func (c *Client) ListRepositoriesForOrg(hostURL, accessToken, org string, page, perPage int) ([]Project, error) {
+	apiHost := fmt.Sprintf("%s/%s", hostURL, "api")
+	httpClient := httpclient.New(
+		httpclient.SetHostURL(apiHost),
+	)
+
+	// api reference: https://gitee.com/api/v5/swagger#/getV5OrgsOrgRepos
+	url := fmt.Sprintf("/v5/orgs/%s/repos", org)
+	queryParams := make(map[string]string)
+	queryParams["access_token"] = accessToken
+	queryParams["type"] = "all"
+	queryParams["page"] = strconv.Itoa(page)
+	queryParams["per_page"] = strconv.Itoa(perPage)
+	queryParams["direct"] = "false"
+
+	var projects []Project
+	_, err := httpClient.Get(url, httpclient.SetQueryParams(queryParams), httpclient.SetResult(&projects))
+	if err != nil {
+		return nil, err
+	}
+
+	return projects, nil
+}
+
+func (c *Client) GetRepositoryDetail(hostURL, accessToken, owner, repo string) (*Project, error) {
+	apiHost := fmt.Sprintf("%s/%s", hostURL, "api")
+	httpClient := httpclient.New(
+		httpclient.SetHostURL(apiHost),
+	)
+
+	// api reference: http://gitee.com/api/v5/swagger#/getV5ReposOwnerRepo
+	url := fmt.Sprintf("/v5/repos/%s/%s", owner, repo)
+	queryParams := make(map[string]string)
+	queryParams["access_token"] = accessToken
+
+	var projectDetail Project
+	_, err := httpClient.Get(url, httpclient.SetQueryParams(queryParams), httpclient.SetResult(&projectDetail))
+	if err != nil {
+		return nil, err
+	}
+
+	return &projectDetail, nil
 }
 
 func (c *Client) ListHooks(ctx context.Context, owner, repo string, opts *gitee.GetV5ReposOwnerRepoHooksOpts) ([]gitee.Hook, error) {
@@ -115,9 +173,10 @@ type Hook struct {
 	MergeRequestsEvents bool      `json:"merge_requests_events"`
 }
 
-func (c *Client) CreateHook(accessToken, owner, repo string, hook *git.Hook) (*Hook, error) {
+func (c *Client) CreateHook(hostURL, accessToken, owner, repo string, hook *git.Hook) (*Hook, error) {
+	apiHost := fmt.Sprintf("%s/%s", hostURL, "api")
 	httpClient := httpclient.New(
-		httpclient.SetHostURL(GiteeHOSTURL),
+		httpclient.SetHostURL(apiHost),
 	)
 	url := fmt.Sprintf("/v5/repos/%s/%s/hooks", owner, repo)
 	var hookInfo *Hook
@@ -187,9 +246,10 @@ type RepoCommitAuthor struct {
 	Email string    `json:"email"`
 }
 
-func (c *Client) GetSingleCommitOfProject(ctx context.Context, accessToken, owner, repo, commitSha string) (*RepoCommit, error) {
+func (c *Client) GetSingleCommitOfProject(ctx context.Context, hostURL, accessToken, owner, repo, commitSha string) (*RepoCommit, error) {
+	apiHost := fmt.Sprintf("%s/%s", hostURL, "api")
 	httpClient := httpclient.New(
-		httpclient.SetHostURL(GiteeHOSTURL),
+		httpclient.SetHostURL(apiHost),
 	)
 	url := fmt.Sprintf("/v5/repos/%s/%s/commits/%s", owner, repo, commitSha)
 
@@ -210,9 +270,9 @@ type AccessToken struct {
 	CreatedAt    int    `json:"created_at"`
 }
 
-func RefreshAccessToken(refreshToken string) (*AccessToken, error) {
+func RefreshAccessToken(baseAddr, refreshToken string) (*AccessToken, error) {
 	httpClient := httpclient.New(
-		httpclient.SetHostURL("https://gitee.com"),
+		httpclient.SetHostURL(baseAddr),
 	)
 	url := "/oauth/token"
 	queryParams := make(map[string]string)
@@ -314,14 +374,43 @@ type CompareAuthor struct {
 	Type              string `json:"type"`
 }
 
-func (c *Client) GetReposOwnerRepoCompareBaseHead(accessToken, owner string, repo string, base string, head string) (*Compare, error) {
+func (c *Client) GetReposOwnerRepoCompareBaseHead(hostURL, accessToken, owner string, repo string, base string, head string) (*Compare, error) {
+	apiHost := fmt.Sprintf("%s/%s", hostURL, "api")
 	httpClient := httpclient.New(
-		httpclient.SetHostURL(GiteeHOSTURL),
+		httpclient.SetHostURL(apiHost),
 	)
 	url := fmt.Sprintf("/v5/repos/%s/%s/compare/%s...%s", owner, repo, base, head)
 
 	var compare *Compare
 	_, err := httpClient.Get(url, httpclient.SetQueryParam("access_token", accessToken), httpclient.SetResult(&compare))
+	if err != nil {
+		return nil, err
+	}
+	return compare, nil
+}
+
+func (c *Client) GetReposOwnerRepoCompareBaseHeadForEnterprise(hostURL, accessToken, owner string, repo string, base string, head string) (*Compare, error) {
+	apiHost := fmt.Sprintf("%s/%s", hostURL, "api")
+	httpClient := httpclient.New(
+		httpclient.SetHostURL(apiHost),
+	)
+	repoDetail, err := c.GetRepositoryDetail(hostURL, accessToken, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	enterpriseName := ""
+	if repoDetail.Namespace.Type == "enterprise" {
+		enterpriseName = repoDetail.Namespace.Path
+	} else {
+		// else this belongs to a group, thus getting it from repoDetail.Namespace.Parent.Path
+		enterpriseName = repoDetail.Namespace.Parent.Path
+	}
+
+	url := fmt.Sprintf("/v5/repos/%s/%s/%s/compare/%s...%s", enterpriseName, owner, repo, base, head)
+
+	var compare *Compare
+	_, err = httpClient.Get(url, httpclient.SetQueryParam("access_token", accessToken), httpclient.SetResult(&compare))
 	if err != nil {
 		return nil, err
 	}

@@ -807,21 +807,22 @@ func CreateWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator string,
 		CommitID:       args.CommitID,
 	}
 	task := &taskmodels.Task{
-		TaskID:           nextTaskID,
-		Type:             config.WorkflowType,
-		ProductName:      workflow.ProductTmplName,
-		PipelineName:     args.WorkflowName,
-		Description:      args.Description,
-		TaskCreator:      taskCreator,
-		ReqID:            args.ReqID,
-		Status:           config.StatusCreated,
-		Stages:           stages,
-		WorkflowArgs:     args,
-		ConfigPayload:    configPayload,
-		StorageURI:       defaultS3StoreURL,
-		ResetImage:       workflow.ResetImage,
-		ResetImagePolicy: workflow.ResetImagePolicy,
-		TriggerBy:        triggerBy,
+		TaskID:              nextTaskID,
+		Type:                config.WorkflowType,
+		ProductName:         workflow.ProductTmplName,
+		PipelineDisplayName: workflow.DisplayName,
+		PipelineName:        args.WorkflowName,
+		Description:         args.Description,
+		TaskCreator:         taskCreator,
+		ReqID:               args.ReqID,
+		Status:              config.StatusCreated,
+		Stages:              stages,
+		WorkflowArgs:        args,
+		ConfigPayload:       configPayload,
+		StorageURI:          defaultS3StoreURL,
+		ResetImage:          workflow.ResetImage,
+		ResetImagePolicy:    workflow.ResetImagePolicy,
+		TriggerBy:           triggerBy,
 	}
 
 	if len(task.Stages) <= 0 {
@@ -1170,17 +1171,18 @@ func createReleaseImageTask(workflow *commonmodels.Workflow, args *commonmodels.
 
 	sort.Sort(ByStageKind(stages))
 	task := &taskmodels.Task{
-		WorkflowArgs:  args,
-		TaskID:        nextTaskID,
-		Type:          config.WorkflowType,
-		ProductName:   workflow.ProductTmplName,
-		PipelineName:  workflow.Name,
-		TaskCreator:   setting.RequestModeOpenAPI,
-		ReqID:         args.ReqID,
-		Status:        config.StatusCreated,
-		Stages:        stages,
-		ConfigPayload: configPayload,
-		StorageURI:    defaultS3StoreURL,
+		WorkflowArgs:        args,
+		TaskID:              nextTaskID,
+		Type:                config.WorkflowType,
+		ProductName:         workflow.ProductTmplName,
+		PipelineName:        workflow.Name,
+		PipelineDisplayName: workflow.DisplayName,
+		TaskCreator:         setting.RequestModeOpenAPI,
+		ReqID:               args.ReqID,
+		Status:              config.StatusCreated,
+		Stages:              stages,
+		ConfigPayload:       configPayload,
+		StorageURI:          defaultS3StoreURL,
 	}
 
 	if len(task.Stages) <= 0 {
@@ -1682,7 +1684,7 @@ func testArgsToSubtask(args *commonmodels.WorkflowTaskArgs, pt *taskmodels.Task,
 			testTask.ResReqSpec = testModule.PreTest.ResReqSpec
 		}
 		// 设置 build 安装脚本
-		testTask.InstallCtx, err = buildInstallCtx(testTask.InstallItems)
+		testTask.InstallCtx, err = BuildInstallCtx(testTask.InstallItems)
 		if err != nil {
 			log.Errorf("buildInstallCtx error: %v", err)
 			return resp, err
@@ -1945,21 +1947,22 @@ func CreateArtifactWorkflowTask(args *commonmodels.WorkflowTaskArgs, taskCreator
 		CommitID:       args.CommitID,
 	}
 	task := &taskmodels.Task{
-		TaskID:           nextTaskID,
-		Type:             config.WorkflowType,
-		ProductName:      workflow.ProductTmplName,
-		PipelineName:     args.WorkflowName,
-		Description:      args.Description,
-		TaskCreator:      taskCreator,
-		ReqID:            args.ReqID,
-		Status:           config.StatusCreated,
-		Stages:           stages,
-		WorkflowArgs:     args,
-		ConfigPayload:    configPayload,
-		StorageURI:       defaultS3StoreURL,
-		ResetImage:       workflow.ResetImage,
-		ResetImagePolicy: workflow.ResetImagePolicy,
-		TriggerBy:        triggerBy,
+		TaskID:              nextTaskID,
+		Type:                config.WorkflowType,
+		ProductName:         workflow.ProductTmplName,
+		PipelineName:        args.WorkflowName,
+		PipelineDisplayName: workflow.DisplayName,
+		Description:         args.Description,
+		TaskCreator:         taskCreator,
+		ReqID:               args.ReqID,
+		Status:              config.StatusCreated,
+		Stages:              stages,
+		WorkflowArgs:        args,
+		ConfigPayload:       configPayload,
+		StorageURI:          defaultS3StoreURL,
+		ResetImage:          workflow.ResetImage,
+		ResetImagePolicy:    workflow.ResetImagePolicy,
+		TriggerBy:           triggerBy,
 	}
 
 	if len(task.Stages) <= 0 {
@@ -2102,7 +2105,7 @@ func BuildModuleToSubTasks(args *commonmodels.BuildModuleArgs, log *zap.SugaredL
 
 		clusterInfo, err := commonrepo.NewK8SClusterColl().Get(module.PreBuild.ClusterID)
 		if err != nil {
-			return nil, e.ErrConvertSubTasks.AddErr(err)
+			return nil, e.ErrConvertSubTasks.AddErr(fmt.Errorf("failed to get cluster: %s, err: %s", module.PreBuild.ClusterID, err))
 		}
 		build.Cache = clusterInfo.Cache
 
@@ -2401,7 +2404,7 @@ func ensurePipelineTask(taskOpt *taskmodels.TaskOpt, log *zap.SugaredLogger) err
 				}
 
 				// 设置 build 安装脚本
-				t.InstallCtx, err = buildInstallCtx(t.InstallItems)
+				t.InstallCtx, err = BuildInstallCtx(t.InstallItems)
 				if err != nil {
 					log.Error(err)
 					return err

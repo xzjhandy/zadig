@@ -157,7 +157,7 @@ func Start(ctx context.Context) {
 
 	go StartControllers(ctx.Done())
 
-	go multiclusterservice.ClusterApplyUpgradeAgent()
+	go multiclusterservice.ClusterApplyUpgrade()
 
 	initRsaKey()
 
@@ -290,6 +290,7 @@ func initDatabase() {
 		commonrepo.NewworkflowTaskv4Coll(),
 		commonrepo.NewWorkflowQueueColl(),
 		commonrepo.NewPluginRepoColl(),
+		commonrepo.NewWorkflowViewColl(),
 
 		systemrepo.NewAnnouncementColl(),
 		systemrepo.NewOperationLogColl(),

@@ -22,6 +22,7 @@ import (
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -64,6 +65,14 @@ func NewDynamicClient() (dynamic.Interface, error) {
 		return nil, err
 	}
 	return dynamic.NewForConfig(config)
+}
+
+func NewDiscoveryClient() (*discovery.DiscoveryClient, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	return discovery.NewDiscoveryClientForConfig(config)
 }
 
 func Client() client.Client {
@@ -131,8 +140,8 @@ func newAPIClient(c client.Client, r client.Reader) client.Client {
 	return &apiClient{Client: c, apiReader: r}
 }
 
-func (c *apiClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-	return c.apiReader.Get(ctx, key, obj)
+func (c *apiClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	return c.apiReader.Get(ctx, key, obj, opts...)
 }
 
 func (c *apiClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {

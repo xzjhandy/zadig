@@ -139,3 +139,45 @@ func DownloadFileFromPod(c *gin.Context) {
 	c.Writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
 	c.Data(http.StatusOK, "application/octet-stream", fileBytes)
 }
+
+func ListNamespace(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = service.ListNamespace(c.Param("clusterID"), ctx.Logger)
+}
+
+func ListDeploymentNames(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = service.ListDeploymentNames(c.Param("clusterID"), c.Param("namespace"), ctx.Logger)
+}
+
+func ListWorkloadsInfo(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = service.ListWorkloadsInfo(c.Param("clusterID"), c.Param("namespace"), ctx.Logger)
+}
+
+func ListCustomWorkload(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = service.ListCustomWorkload(c.Param("clusterID"), c.Param("namespace"), ctx.Logger)
+}
+
+func ListCanaryDeploymentServiceInfo(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = service.ListCanaryDeploymentServiceInfo(c.Param("clusterID"), c.Param("namespace"), ctx.Logger)
+}
+
+func ListAllK8sResourcesInNamespace(c *gin.Context) {
+	ctx := internalhandler.NewContext(c)
+	defer func() { internalhandler.JSONResponse(c, ctx) }()
+
+	ctx.Resp, ctx.Err = service.ListAllK8sResourcesInNamespace(c.Param("clusterID"), c.Param("namespace"), ctx.Logger)
+}

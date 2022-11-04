@@ -34,6 +34,7 @@ import (
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/webhook"
 	"github.com/koderover/zadig/pkg/setting"
 	e "github.com/koderover/zadig/pkg/tool/errors"
+	"github.com/koderover/zadig/pkg/tool/log"
 	"github.com/koderover/zadig/pkg/types"
 )
 
@@ -47,6 +48,7 @@ type EnvStatus struct {
 
 type Workflow struct {
 	Name                 string                     `json:"name"`
+	DisplayName          string                     `json:"display_name"`
 	ProjectName          string                     `json:"projectName"`
 	UpdateTime           int64                      `json:"updateTime"`
 	CreateTime           int64                      `json:"createTime"`
@@ -70,6 +72,8 @@ type TaskInfo struct {
 	TaskID       int64  `json:"taskID"`
 	PipelineName string `json:"pipelineName"`
 	Status       string `json:"status"`
+	TaskCreator  string `json:"task_creator"`
+	CreateTime   int64  `json:"create_time"`
 }
 
 type workflowCreateArg struct {
@@ -190,6 +194,7 @@ func AutoCreateWorkflow(productName string, log *zap.SugaredLogger) *EnvStatus {
 			workflow.Enabled = true
 			workflow.ProductTmplName = productName
 			workflow.Name = workflowName
+			workflow.DisplayName = workflowName
 			workflow.CreateBy = setting.SystemUser
 			workflow.UpdateBy = setting.SystemUser
 			workflow.EnvName = workflowArg.envName
@@ -204,7 +209,6 @@ func AutoCreateWorkflow(productName string, log *zap.SugaredLogger) *EnvStatus {
 					Enabled: true,
 					Modules: artifactModules,
 				}
-				workflow.EnvName = "ops" //TODO necessary to set a fake env name?
 			}
 
 			workflow.Schedules = &commonmodels.ScheduleCtrl{
@@ -285,9 +289,16 @@ func FindWorkflow(workflowName string, log *zap.SugaredLogger) (*commonmodels.Wo
 		}
 		resp.Schedules = &schedule
 	}
+
+	services, err := commonrepo.NewServiceColl().ListMaxRevisionsByProduct(resp.ProductTmplName)
+	if err != nil {
+		log.Errorf("ServiceTmpl.ListMaxRevisions error: %v", err)
+		return resp, e.ErrListTemplate.AddDesc(err.Error())
+	}
+
 	if resp.BuildStage.Enabled {
 		// make a map of current target modules
-		buildMap := map[string]bool{}
+		buildMap := map[string]*commonmodels.BuildModule{}
 
 		moList, err := commonrepo.NewBuildColl().List(&commonrepo.BuildListOption{})
 		if err != nil {
@@ -295,22 +306,18 @@ func FindWorkflow(workflowName string, log *zap.SugaredLogger) (*commonmodels.Wo
 		}
 		for _, build := range resp.BuildStage.Modules {
 			key := fmt.Sprintf("%s-%s-%s", build.Target.ProductName, build.Target.ServiceName, build.Target.ServiceModule)
-			buildMap[key] = true
+			buildMap[key] = build
 			if build.Target.BuildName == "" {
 				build.Target.BuildName = findBuildName(key, moList)
 			}
 		}
 
-		services, err := commonrepo.NewServiceColl().ListMaxRevisionsByProduct(resp.ProductTmplName)
-		if err != nil {
-			log.Errorf("ServiceTmpl.ListMaxRevisions error: %v", err)
-			return resp, e.ErrListTemplate.AddDesc(err.Error())
-		}
-
+		buildModules := []*commonmodels.BuildModule{}
 		for _, serviceTmpl := range services {
 			switch serviceTmpl.Type {
 			case setting.PMDeployType:
 				// PM service does not have such logic
+				buildModules = resp.BuildStage.Modules
 				break
 
 			case setting.K8SDeployType, setting.HelmDeployType:
@@ -318,8 +325,8 @@ func FindWorkflow(workflowName string, log *zap.SugaredLogger) (*commonmodels.Wo
 					key := fmt.Sprintf("%s-%s-%s", serviceTmpl.ProductName, serviceTmpl.ServiceName, container.Name)
 					// if no target info is found for this container, meaning that this is a new service for that workflow
 					// then we need to add it to the response
-					if _, ok := buildMap[key]; !ok {
-						resp.BuildStage.Modules = append(resp.BuildStage.Modules, &commonmodels.BuildModule{
+					if mod, ok := buildMap[key]; !ok {
+						buildModules = append(buildModules, &commonmodels.BuildModule{
 							HideServiceModule: false,
 							BuildModuleVer:    "stable",
 							Target: &commonmodels.ServiceModuleTarget{
@@ -329,10 +336,13 @@ func FindWorkflow(workflowName string, log *zap.SugaredLogger) (*commonmodels.Wo
 								BuildName:     findBuildName(key, moList),
 							},
 						})
+					} else {
+						buildModules = append(buildModules, mod)
 					}
 				}
 			}
 		}
+		resp.BuildStage.Modules = buildModules
 	}
 
 	for _, module := range resp.BuildStage.Modules {
@@ -340,6 +350,46 @@ func FindWorkflow(workflowName string, log *zap.SugaredLogger) (*commonmodels.Wo
 			bf.RepoNamespace = bf.GetNamespace()
 		}
 	}
+	if resp.ArtifactStage != nil && resp.ArtifactStage.Enabled {
+		// make a map of current target modules
+		artifactMap := map[string]*commonmodels.ArtifactModule{}
+
+		for _, artifact := range resp.ArtifactStage.Modules {
+			key := fmt.Sprintf("%s-%s-%s", artifact.Target.ProductName, artifact.Target.ServiceName, artifact.Target.ServiceModule)
+			artifactMap[key] = artifact
+		}
+
+		artifactModules := []*commonmodels.ArtifactModule{}
+		for _, serviceTmpl := range services {
+			switch serviceTmpl.Type {
+			case setting.PMDeployType:
+				// PM service does not have such logic
+				artifactModules = resp.ArtifactStage.Modules
+				break
+
+			case setting.K8SDeployType, setting.HelmDeployType:
+				for _, container := range serviceTmpl.Containers {
+					key := fmt.Sprintf("%s-%s-%s", serviceTmpl.ProductName, serviceTmpl.ServiceName, container.Name)
+					// if no target info is found for this container, meaning that this is a new service for that workflow
+					// then we need to add it to the response
+					if mod, ok := artifactMap[key]; !ok {
+						artifactModules = append(artifactModules, &commonmodels.ArtifactModule{
+							HideServiceModule: false,
+							Target: &commonmodels.ServiceModuleTarget{
+								ProductName:   serviceTmpl.ProductName,
+								ServiceName:   serviceTmpl.ServiceName,
+								ServiceModule: container.Name,
+							},
+						})
+					} else {
+						artifactModules = append(artifactModules, mod)
+					}
+				}
+			}
+		}
+		resp.ArtifactStage.Modules = artifactModules
+	}
+
 	for _, test := range resp.TestStage.Tests {
 		testModule, err := commonrepo.NewTestingColl().Find(test.Name, "")
 		if err != nil {
@@ -446,7 +496,12 @@ func PreSetWorkflow(productName string, log *zap.SugaredLogger) ([]*PreSetResp, 
 func CreateWorkflow(workflow *commonmodels.Workflow, log *zap.SugaredLogger) error {
 	existedWorkflow, err := commonrepo.NewWorkflowColl().Find(workflow.Name)
 	if err == nil {
-		errStr := fmt.Sprintf("workflow [%s] 在项目 [%s] 中已经存在!", workflow.Name, existedWorkflow.ProductTmplName)
+		errStr := fmt.Sprintf("与项目 [%s] 中的工作流 [%s] 标识相同", existedWorkflow.ProductTmplName, existedWorkflow.DisplayName)
+		return e.ErrUpsertWorkflow.AddDesc(errStr)
+	}
+	existedWorkflows, _ := commonrepo.NewWorkflowColl().List(&commonrepo.ListWorkflowOption{Projects: []string{workflow.ProductTmplName}, DisplayName: workflow.DisplayName})
+	if len(existedWorkflows) > 0 {
+		errStr := fmt.Sprintf("当前项目已存在工作流 [%s]", workflow.DisplayName)
 		return e.ErrUpsertWorkflow.AddDesc(errStr)
 	}
 
@@ -520,6 +575,13 @@ func UpdateWorkflow(workflow *commonmodels.Workflow, log *zap.SugaredLogger) err
 	if err != nil {
 		log.Errorf("Can not find workflow %s, err: %s", workflow.Name, err)
 		return e.ErrUpsertWorkflow.AddDesc(err.Error())
+	}
+	if workflow.DisplayName != currentWorkflow.DisplayName {
+		existedWorkflows, _ := commonrepo.NewWorkflowColl().List(&commonrepo.ListWorkflowOption{Projects: []string{workflow.ProductTmplName}, DisplayName: workflow.DisplayName})
+		if len(existedWorkflows) > 0 {
+			errStr := fmt.Sprintf("workflow [%s] 展示名称在当前项目下重复!", workflow.DisplayName)
+			return e.ErrUpsertWorkflow.AddDesc(errStr)
+		}
 	}
 
 	if err := validateWorkflowHookNames(workflow); err != nil {
@@ -611,6 +673,7 @@ func ListWorkflows(projects []string, userID string, names []string, log *zap.Su
 		}
 		res = append(res, &Workflow{
 			Name:             w.Name,
+			DisplayName:      w.DisplayName,
 			ProjectName:      w.ProductTmplName,
 			UpdateTime:       w.UpdateTime,
 			CreateTime:       w.CreateTime,
@@ -635,14 +698,7 @@ func ListWorkflows(projects []string, userID string, names []string, log *zap.Su
 		favoriteSet.Insert(f.Name)
 	}
 
-	workflowStats, err := commonrepo.NewWorkflowStatColl().FindWorkflowStat(&commonrepo.WorkflowStatArgs{Names: workflowNames, Type: string(config.WorkflowType)})
-	if err != nil {
-		log.Warnf("Failed to list workflow stats, err: %s", err)
-	}
-	workflowStatMap := make(map[string]*commonmodels.WorkflowStat)
-	for _, s := range workflowStats {
-		workflowStatMap[s.Name] = s
-	}
+	workflowStatMap := getWorkflowStatMap(workflowNames, config.WorkflowType)
 
 	tasks, err := commonrepo.NewTaskColl().ListPreview(workflowNames)
 	if err != nil {
@@ -654,15 +710,7 @@ func ListWorkflows(projects []string, userID string, names []string, log *zap.Su
 		if favoriteSet.Has(r.Name) {
 			r.IsFavorite = true
 		}
-
-		if s, ok := workflowStatMap[r.Name]; ok {
-			total := float64(s.TotalSuccess + s.TotalFailure)
-			successful := float64(s.TotalSuccess)
-			totalDuration := float64(s.TotalDuration)
-
-			r.AverageExecutionTime = totalDuration / total
-			r.SuccessRate = successful / total
-		}
+		setWorkflowStat(r, workflowStatMap)
 	}
 
 	return res, nil
@@ -691,6 +739,8 @@ func getRecentTaskInfo(workflow *Workflow, tasks []*commonrepo.TaskPreview) {
 			TaskID:       recentTask.TaskID,
 			PipelineName: recentTask.PipelineName,
 			Status:       string(recentTask.Status),
+			TaskCreator:  recentTask.TaskCreator,
+			CreateTime:   recentTask.CreateTime,
 		}
 	}
 	if recentSucceedTask.TaskID > 0 {
@@ -698,6 +748,8 @@ func getRecentTaskInfo(workflow *Workflow, tasks []*commonrepo.TaskPreview) {
 			TaskID:       recentSucceedTask.TaskID,
 			PipelineName: recentSucceedTask.PipelineName,
 			Status:       string(recentSucceedTask.Status),
+			TaskCreator:  recentSucceedTask.TaskCreator,
+			CreateTime:   recentSucceedTask.CreateTime,
 		}
 	}
 	if recentFailedTask.TaskID > 0 {
@@ -705,6 +757,8 @@ func getRecentTaskInfo(workflow *Workflow, tasks []*commonrepo.TaskPreview) {
 			TaskID:       recentFailedTask.TaskID,
 			PipelineName: recentFailedTask.PipelineName,
 			Status:       string(recentFailedTask.Status),
+			TaskCreator:  recentFailedTask.TaskCreator,
+			CreateTime:   recentFailedTask.CreateTime,
 		}
 	}
 }
@@ -731,7 +785,7 @@ func ListTestWorkflows(testName string, projects []string, log *zap.SugaredLogge
 	return workflows, nil
 }
 
-func CopyWorkflow(oldWorkflowName, newWorkflowName, username string, log *zap.SugaredLogger) error {
+func CopyWorkflow(oldWorkflowName, newWorkflowName, newWorkflowDisplayName, username string, log *zap.SugaredLogger) error {
 	oldWorkflow, err := commonrepo.NewWorkflowColl().Find(oldWorkflowName)
 	if err != nil {
 		log.Error(err)
@@ -742,18 +796,25 @@ func CopyWorkflow(oldWorkflowName, newWorkflowName, username string, log *zap.Su
 		log.Error("new workflow already exists")
 		return e.ErrExistsPipeline
 	}
+	existedWorkflows, _ := commonrepo.NewWorkflowColl().List(&commonrepo.ListWorkflowOption{Projects: []string{oldWorkflow.ProductTmplName}, DisplayName: newWorkflowDisplayName})
+	if len(existedWorkflows) > 0 {
+		errStr := fmt.Sprintf("当前项目已存在工作流 [%s]", newWorkflowDisplayName)
+		return e.ErrUpsertWorkflow.AddDesc(errStr)
+	}
 	oldWorkflow.UpdateBy = username
 	oldWorkflow.Name = newWorkflowName
+	oldWorkflow.DisplayName = newWorkflowDisplayName
 	oldWorkflow.ID = primitive.NewObjectID()
 
 	return commonrepo.NewWorkflowColl().Create(oldWorkflow)
 }
 
 type WorkflowCopyItem struct {
-	ProjectName string `json:"project_name"`
-	Old         string `json:"old"`
-	New         string `json:"new"`
-	BaseName    string `json:"base_name"`
+	ProjectName    string `json:"project_name"`
+	Old            string `json:"old"`
+	New            string `json:"new"`
+	NewDisplayName string `json:"new_display_name"`
+	BaseName       string `json:"base_name"`
 }
 
 type BulkCopyWorkflowArgs struct {
@@ -786,13 +847,38 @@ func BulkCopyWorkflow(args BulkCopyWorkflowArgs, username string, log *zap.Sugar
 			newItem := *item
 			newItem.UpdateBy = username
 			newItem.Name = workflow.New
+			newItem.DisplayName = workflow.NewDisplayName
 			newItem.BaseName = workflow.BaseName
 			newItem.ID = primitive.NewObjectID()
 
 			newWorkflows = append(newWorkflows, &newItem)
 		} else {
-			return fmt.Errorf("workflow:%s not exist", item.ProductTmplName+"-"+item.Name)
+			log.Errorf("workflow:%s not exist", workflow.ProjectName+"-"+workflow.Old)
+			return fmt.Errorf("workflow:%s not exist", workflow.ProjectName+"-"+workflow.Old)
 		}
 	}
 	return commonrepo.NewWorkflowColl().BulkCreate(newWorkflows)
+}
+
+func getWorkflowStatMap(workflowNames []string, workflowType config.PipelineType) map[string]*commonmodels.WorkflowStat {
+	workflowStats, err := commonrepo.NewWorkflowStatColl().FindWorkflowStat(&commonrepo.WorkflowStatArgs{Names: workflowNames, Type: string(workflowType)})
+	if err != nil {
+		log.Warnf("Failed to list workflow stats, err: %s", err)
+	}
+	workflowStatMap := make(map[string]*commonmodels.WorkflowStat)
+	for _, s := range workflowStats {
+		workflowStatMap[s.Name] = s
+	}
+	return workflowStatMap
+}
+
+func setWorkflowStat(workflow *Workflow, statMap map[string]*commonmodels.WorkflowStat) {
+	if s, ok := statMap[workflow.Name]; ok {
+		total := float64(s.TotalSuccess + s.TotalFailure)
+		successful := float64(s.TotalSuccess)
+		totalDuration := float64(s.TotalDuration)
+
+		workflow.AverageExecutionTime = totalDuration / total
+		workflow.SuccessRate = successful / total
+	}
 }

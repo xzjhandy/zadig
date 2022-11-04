@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -29,8 +30,8 @@ import (
 	"strings"
 	"time"
 
-	s3tool "github.com/koderover/zadig/pkg/tool/s3"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -44,6 +45,7 @@ import (
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/multicluster/service"
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
 	"github.com/koderover/zadig/pkg/setting"
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
@@ -53,6 +55,7 @@ import (
 	"github.com/koderover/zadig/pkg/tool/kube/podexec"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	"github.com/koderover/zadig/pkg/tool/log"
+	s3tool "github.com/koderover/zadig/pkg/tool/s3"
 	commontypes "github.com/koderover/zadig/pkg/types"
 	"github.com/koderover/zadig/pkg/types/job"
 	"github.com/koderover/zadig/pkg/util"
@@ -87,10 +90,8 @@ func GetK8sClients(hubServerAddr, clusterID string) (crClient.Client, kubernetes
 }
 
 type JobLabel struct {
-	WorkflowName string
-	TaskID       int64
-	JobName      string
-	JobType      string
+	JobName string
+	JobType string
 }
 
 func ensureDeleteConfigMap(namespace string, jobLabel *JobLabel, kubeClient crClient.Client) error {
@@ -106,7 +107,6 @@ func ensureDeleteJob(namespace string, jobLabel *JobLabel, kubeClient crClient.C
 // getJobLabels get labels k-v map from JobLabel struct
 func getJobLabels(jobLabel *JobLabel) map[string]string {
 	retMap := map[string]string{
-		setting.JobLabelTaskKey:  fmt.Sprintf("%s-%d", strings.ToLower(jobLabel.WorkflowName), jobLabel.TaskID),
 		setting.JobLabelNameKey:  strings.Replace(jobLabel.JobName, "_", "-", -1),
 		setting.JobLabelSTypeKey: strings.Replace(jobLabel.JobType, "_", "-", -1),
 	}
@@ -146,7 +146,77 @@ func getBaseImage(buildOS, imageFrom string) string {
 	return jobImage
 }
 
-func buildPlainJob(jobName string, resReq setting.Request, resReqSpec setting.RequestSpec, jobTask *commonmodels.JobTask, workflowCtx *commonmodels.WorkflowTaskCtx) (*batchv1.Job, error) {
+func buildTolerations(clusterConfig *commonmodels.AdvancedConfig) []corev1.Toleration {
+	ret := make([]corev1.Toleration, 0)
+	if clusterConfig == nil || len(clusterConfig.Tolerations) == 0 {
+		return ret
+	}
+
+	err := yaml.Unmarshal([]byte(clusterConfig.Tolerations), &ret)
+	if err != nil {
+		log.Errorf("failed to parse toleration config, err: %s", err)
+		return nil
+	}
+	return ret
+}
+
+func addNodeAffinity(clusterConfig *commonmodels.AdvancedConfig) *corev1.Affinity {
+	if clusterConfig == nil || len(clusterConfig.NodeLabels) == 0 {
+		return nil
+	}
+
+	switch clusterConfig.Strategy {
+	case setting.RequiredSchedule:
+		nodeSelectorTerms := make([]corev1.NodeSelectorTerm, 0)
+		for _, nodeLabel := range clusterConfig.NodeLabels {
+			var matchExpressions []corev1.NodeSelectorRequirement
+			matchExpressions = append(matchExpressions, corev1.NodeSelectorRequirement{
+				Key:      nodeLabel.Key,
+				Operator: nodeLabel.Operator,
+				Values:   nodeLabel.Value,
+			})
+			nodeSelectorTerms = append(nodeSelectorTerms, corev1.NodeSelectorTerm{
+				MatchExpressions: matchExpressions,
+			})
+		}
+
+		affinity := &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: nodeSelectorTerms,
+				},
+			},
+		}
+		return affinity
+	case setting.PreferredSchedule:
+		preferredScheduleTerms := make([]corev1.PreferredSchedulingTerm, 0)
+		for _, nodeLabel := range clusterConfig.NodeLabels {
+			var matchExpressions []corev1.NodeSelectorRequirement
+			matchExpressions = append(matchExpressions, corev1.NodeSelectorRequirement{
+				Key:      nodeLabel.Key,
+				Operator: nodeLabel.Operator,
+				Values:   nodeLabel.Value,
+			})
+			nodeSelectorTerm := corev1.NodeSelectorTerm{
+				MatchExpressions: matchExpressions,
+			}
+			preferredScheduleTerms = append(preferredScheduleTerms, corev1.PreferredSchedulingTerm{
+				Weight:     10,
+				Preference: nodeSelectorTerm,
+			})
+		}
+		affinity := &corev1.Affinity{
+			NodeAffinity: &corev1.NodeAffinity{
+				PreferredDuringSchedulingIgnoredDuringExecution: preferredScheduleTerms,
+			},
+		}
+		return affinity
+	default:
+		return nil
+	}
+}
+
+func buildPlainJob(jobName string, resReq setting.Request, resReqSpec setting.RequestSpec, jobTask *commonmodels.JobTask, jobTaskSpec *commonmodels.JobTaskPluginSpec, workflowCtx *commonmodels.WorkflowTaskCtx) (*batchv1.Job, error) {
 	collectJobOutput := `OLD_IFS=$IFS
 export IFS=","
 files='%s'
@@ -174,20 +244,28 @@ echo $result > %s
 	collectJobOutputCommand := fmt.Sprintf(collectJobOutput, strings.Join(files, ","), strings.Join(outputs, ","), job.JobTerminationFile)
 
 	labels := getJobLabels(&JobLabel{
-		WorkflowName: workflowCtx.WorkflowName,
-		TaskID:       workflowCtx.TaskID,
-		JobType:      string(jobTask.JobType),
-		JobName:      jobTask.Name,
+		JobType: string(jobTask.JobType),
+		JobName: jobTask.K8sJobName,
 	})
 
-	ImagePullSecrets, err := getImagePullSecrets(jobTask.Properties.Registries)
+	ImagePullSecrets, err := getImagePullSecrets(jobTaskSpec.Properties.Registries)
 	if err != nil {
 		return nil, err
 	}
 
 	envs := []corev1.EnvVar{}
-	for _, env := range jobTask.Plugin.Envs {
+	for _, env := range jobTaskSpec.Plugin.Envs {
 		envs = append(envs, corev1.EnvVar{Name: env.Name, Value: env.Value})
+	}
+
+	clusterID := jobTaskSpec.Properties.ClusterID
+	if clusterID == "" {
+		clusterID = setting.LocalClusterID
+	}
+	// fetch cluster to get nodeAffinity and tolerations
+	targetCluster, err := service.GetCluster(clusterID, log.SugaredLogger())
+	if err != nil {
+		return nil, fmt.Errorf("failed to find target cluster %s, err: %s", clusterID, err)
 	}
 
 	job := &batchv1.Job{
@@ -202,7 +280,7 @@ echo $result > %s
 			// in case finished zombie job not cleaned up by zadig
 			TTLSecondsAfterFinished: int32Ptr(3600),
 			// in case zombie job never stop
-			ActiveDeadlineSeconds: int64Ptr(jobTask.Properties.Timeout*60 + 3600),
+			ActiveDeadlineSeconds: int64Ptr(jobTaskSpec.Properties.Timeout*60 + 3600),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
@@ -214,16 +292,16 @@ echo $result > %s
 						{
 							ImagePullPolicy: corev1.PullAlways,
 							Name:            jobTask.Name,
-							Image:           jobTask.Plugin.Image,
-							Args:            jobTask.Plugin.Args,
-							Command:         jobTask.Plugin.Cmds,
+							Image:           jobTaskSpec.Plugin.Image,
+							Args:            jobTaskSpec.Plugin.Args,
+							Command:         jobTaskSpec.Plugin.Cmds,
 							Lifecycle: &corev1.Lifecycle{
-								PostStart: &corev1.Handler{
+								PostStart: &corev1.LifecycleHandler{
 									Exec: &corev1.ExecAction{
 										Command: []string{"/bin/sh", "-c", fmt.Sprintf("mkdir -p %s", job.JobOutputDir)},
 									},
 								},
-								PreStop: &corev1.Handler{
+								PreStop: &corev1.LifecycleHandler{
 									Exec: &corev1.ExecAction{
 										Command: []string{"/bin/sh", "-c", collectJobOutputCommand},
 									},
@@ -250,6 +328,8 @@ echo $result > %s
 							},
 						},
 					},
+					Tolerations: buildTolerations(targetCluster.AdvancedConfig),
+					Affinity:    addNodeAffinity(targetCluster.AdvancedConfig),
 				},
 			},
 		},
@@ -257,7 +337,7 @@ echo $result > %s
 	return job, nil
 }
 
-func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, resReq setting.Request, resReqSpec setting.RequestSpec, jobTask *commonmodels.JobTask, workflowCtx *commonmodels.WorkflowTaskCtx, registries []*task.RegistryNamespace) (*batchv1.Job, error) {
+func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, resReq setting.Request, resReqSpec setting.RequestSpec, jobTask *commonmodels.JobTask, jobTaskSpec *commonmodels.JobTaskFreestyleSpec, workflowCtx *commonmodels.WorkflowTaskCtx, registries []*task.RegistryNamespace) (*batchv1.Job, error) {
 	// 	tailLogCommandTemplate := `tail -f %s &
 	// while [ -f %s ];
 	// do
@@ -277,16 +357,23 @@ func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, re
 		jobExecutorBinaryFile = strings.Replace(jobExecutorBinaryFile, ResourceServer, ResourceServer+"."+currentNamespace, -1)
 	}
 
+	if clusterID == "" {
+		clusterID = setting.LocalClusterID
+	}
+	// fetch cluster to get nodeAffinity and tolerations
+	targetCluster, err := service.GetCluster(clusterID, log.SugaredLogger())
+	if err != nil {
+		return nil, fmt.Errorf("failed to find target cluster %s, err: %s", clusterID, err)
+	}
+
 	jobExecutorBootingScript = fmt.Sprintf("curl -m 10 --retry-delay 3 --retry 3 -sSL %s -o reaper && chmod +x reaper && mv reaper /usr/local/bin && /usr/local/bin/reaper", jobExecutorBinaryFile)
 
 	labels := getJobLabels(&JobLabel{
-		WorkflowName: workflowCtx.WorkflowName,
-		TaskID:       workflowCtx.TaskID,
-		JobType:      string(jobType),
-		JobName:      jobTask.Name,
+		JobType: string(jobType),
+		JobName: jobTask.K8sJobName,
 	})
 
-	ImagePullSecrets, err := getImagePullSecrets(jobTask.Properties.Registries)
+	ImagePullSecrets, err := getImagePullSecrets(jobTaskSpec.Properties.Registries)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +390,7 @@ func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, re
 			// in case finished zombie job not cleaned up by zadig
 			TTLSecondsAfterFinished: int32Ptr(3600),
 			// in case zombie job never stop
-			ActiveDeadlineSeconds: int64Ptr(jobTask.Properties.Timeout*60 + 3600),
+			ActiveDeadlineSeconds: int64Ptr(jobTaskSpec.Properties.Timeout*60 + 3600),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
@@ -343,7 +430,7 @@ func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, re
 								// 连接对应wd上的dockerdeamon
 								{
 									Name:  "DOCKER_HOST",
-									Value: jobTask.Properties.DockerHost,
+									Value: jobTaskSpec.Properties.DockerHost,
 								},
 							},
 							VolumeMounts: getVolumeMounts(workflowCtx.ConfigMapMountDir),
@@ -362,32 +449,34 @@ func buildJob(jobType, jobImage, jobName, clusterID, currentNamespace string, re
 						// 	Lifecycle:       &corev1.Lifecycle{},
 						// },
 					},
-					Volumes: getVolumes(jobName),
+					Volumes:     getVolumes(jobName),
+					Tolerations: buildTolerations(targetCluster.AdvancedConfig),
+					Affinity:    addNodeAffinity(targetCluster.AdvancedConfig),
 				},
 			},
 		},
 	}
 
-	if jobTask.Properties.CacheEnable && jobTask.Properties.Cache.MediumType == commontypes.NFSMedium {
+	if jobTaskSpec.Properties.CacheEnable && jobTaskSpec.Properties.Cache.MediumType == commontypes.NFSMedium {
 		volumeName := "build-cache"
 		job.Spec.Template.Spec.Volumes = append(job.Spec.Template.Spec.Volumes, corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: jobTask.Properties.Cache.NFSProperties.PVC,
+					ClaimName: jobTaskSpec.Properties.Cache.NFSProperties.PVC,
 				},
 			},
 		})
 
-		mountPath := jobTask.Properties.CacheUserDir
-		if jobTask.Properties.CacheDirType == commontypes.WorkspaceCacheDir {
+		mountPath := jobTaskSpec.Properties.CacheUserDir
+		if jobTaskSpec.Properties.CacheDirType == commontypes.WorkspaceCacheDir {
 			mountPath = workflowCtx.Workspace
 		}
 
 		job.Spec.Template.Spec.Containers[0].VolumeMounts = append(job.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 			Name:      volumeName,
 			MountPath: mountPath,
-			SubPath:   jobTask.Properties.Cache.NFSProperties.Subpath,
+			SubPath:   jobTaskSpec.Properties.Cache.NFSProperties.Subpath,
 		})
 	}
 
@@ -477,9 +566,9 @@ func getResourceRequirements(resReq setting.Request, resReqSpec setting.RequestS
 	}
 }
 
-//generateResourceRequirements
-//cpu Request:Limit=1:4
-//memory default Request:Limit=1:4 ; if memoryLimit>= 8Gi,Request:Limit=1:8
+// generateResourceRequirements
+// cpu Request:Limit=1:4
+// memory default Request:Limit=1:4 ; if memoryLimit>= 8Gi,Request:Limit=1:8
 func generateResourceRequirements(req setting.Request, reqSpec setting.RequestSpec) corev1.ResourceRequirements {
 
 	if req != setting.DefineRequest {
@@ -495,27 +584,42 @@ func generateResourceRequirements(req setting.Request, reqSpec setting.RequestSp
 		}
 	}
 
-	cpuReqInt := reqSpec.CpuLimit / 4
-	if cpuReqInt < 1 {
-		cpuReqInt = 1
+	limits := corev1.ResourceList{}
+	requests := corev1.ResourceList{}
+
+	if reqSpec.CpuLimit > 0 {
+		cpuReqInt := reqSpec.CpuLimit / 4
+		if cpuReqInt < 1 {
+			cpuReqInt = 1
+		}
+		limits[corev1.ResourceCPU] = resource.MustParse(strconv.Itoa(reqSpec.CpuLimit) + setting.CpuUintM)
+		requests[corev1.ResourceCPU] = resource.MustParse(strconv.Itoa(cpuReqInt) + setting.CpuUintM)
 	}
-	memoryReqInt := reqSpec.MemoryLimit / 4
-	if memoryReqInt >= 2*1024 {
-		memoryReqInt = memoryReqInt / 2
+
+	if reqSpec.MemoryLimit > 0 {
+		memoryReqInt := reqSpec.MemoryLimit / 4
+		if memoryReqInt >= 2*1024 {
+			memoryReqInt = memoryReqInt / 2
+		}
+		if memoryReqInt < 1 {
+			memoryReqInt = 1
+		}
+		limits[corev1.ResourceMemory] = resource.MustParse(strconv.Itoa(reqSpec.MemoryLimit) + setting.MemoryUintMi)
+		requests[corev1.ResourceMemory] = resource.MustParse(strconv.Itoa(memoryReqInt) + setting.MemoryUintMi)
 	}
-	if memoryReqInt < 1 {
-		memoryReqInt = 1
+
+	// add gpu limit
+	if len(reqSpec.GpuLimit) > 0 {
+		reqSpec.GpuLimit = strings.ReplaceAll(reqSpec.GpuLimit, " ", "")
+		requestPair := strings.Split(reqSpec.GpuLimit, ":")
+		if len(requestPair) == 2 {
+			limits[corev1.ResourceName(requestPair[0])] = resource.MustParse(requestPair[1])
+		}
 	}
 
 	return corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(strconv.Itoa(reqSpec.CpuLimit) + setting.CpuUintM),
-			corev1.ResourceMemory: resource.MustParse(strconv.Itoa(reqSpec.MemoryLimit) + setting.MemoryUintMi),
-		},
-		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(strconv.Itoa(cpuReqInt) + setting.CpuUintM),
-			corev1.ResourceMemory: resource.MustParse(strconv.Itoa(memoryReqInt) + setting.MemoryUintMi),
-		},
+		Limits:   limits,
+		Requests: requests,
 	}
 }
 
@@ -717,9 +821,9 @@ func getJobOutput(namespace, containerName string, jobLabel *JobLabel, kubeClien
 	return resp, nil
 }
 
-func saveContainerLog(job *commonmodels.JobTask, workflowName string, taskID int64, jobLabel *JobLabel, kubeClient crClient.Client) error {
+func saveContainerLog(namespace, clusterID, workflowName, jobName string, taskID int64, jobLabel *JobLabel, kubeClient crClient.Client) error {
 	selector := labels.Set(getJobLabels(jobLabel)).AsSelector()
-	pods, err := getter.ListPods(job.Properties.Namespace, selector, kubeClient)
+	pods, err := getter.ListPods(namespace, selector, kubeClient)
 	if err != nil {
 		return err
 	}
@@ -738,13 +842,13 @@ func saveContainerLog(job *commonmodels.JobTask, workflowName string, taskID int
 		return pods[i].CreationTimestamp.Before(&pods[j].CreationTimestamp)
 	})
 
-	clientSet, err := kubeclient.GetClientset(config.HubServerAddress(), job.Properties.ClusterID)
+	clientSet, err := kubeclient.GetClientset(config.HubServerAddress(), clusterID)
 	if err != nil {
 		log.Errorf("saveContainerLog, get client set error: %s", err)
 		return err
 	}
 
-	if err := containerlog.GetContainerLogs(job.Properties.Namespace, pods[0].Name, pods[0].Spec.Containers[0].Name, false, int64(0), buf, clientSet); err != nil {
+	if err := containerlog.GetContainerLogs(namespace, pods[0].Name, pods[0].Spec.Containers[0].Name, false, int64(0), buf, clientSet); err != nil {
 		return fmt.Errorf("failed to get container logs: %s", err)
 	}
 
@@ -772,7 +876,7 @@ func saveContainerLog(job *commonmodels.JobTask, workflowName string, taskID int
 			if err != nil {
 				return fmt.Errorf("saveContainerLog s3 create client error: %v", err)
 			}
-			fileName := strings.Replace(strings.ToLower(job.Name), "_", "-", -1)
+			fileName := strings.Replace(strings.ToLower(jobName), "_", "-", -1)
 			objectKey := GetObjectPath(store.Subfolder, fileName+".log")
 			if err = s3client.Upload(
 				store.Bucket,
@@ -808,4 +912,35 @@ func checkDogFoodExistsInContainer(clientset kubernetes.Interface, restConfig *r
 	})
 
 	return commontypes.JobStatus(stdout), success, err
+}
+
+func waitDeploymentReady(ctx context.Context, deploymentName, namespace string, timout int64, kubeClient crClient.Client, logger *zap.SugaredLogger) (config.Status, error) {
+	timeout := time.After(time.Duration(timout) * time.Second)
+	tick := time.NewTicker(time.Second * 2)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return config.StatusCancelled, errors.New("job was cancelled")
+
+		case <-timeout:
+			msg := fmt.Sprintf("timeout waiting for the deployment: %s to run", deploymentName)
+			return config.StatusTimeout, errors.New(msg)
+
+		case <-tick.C:
+			d, found, err := getter.GetDeployment(namespace, deploymentName, kubeClient)
+			if err != nil || !found {
+				logger.Errorf(
+					"failed to check deployment ready status %s/%s - %v",
+					namespace,
+					deploymentName,
+					err,
+				)
+			} else {
+				if wrapper.Deployment(d).Ready() {
+					return config.StatusRunning, nil
+				}
+			}
+		}
+	}
 }

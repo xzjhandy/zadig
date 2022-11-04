@@ -121,6 +121,7 @@ func (p *ScanPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 		RepoName:           p.Task.Repos[0].RepoName,
 		Branch:             p.Task.Repos[0].Branch,
 		PR:                 p.Task.Repos[0].PR,
+		PRs:                p.Task.Repos[0].PRs,
 		Tag:                p.Task.Repos[0].Tag,
 		OauthToken:         p.Task.Repos[0].OauthToken,
 		Address:            p.Task.Repos[0].Address,
@@ -141,6 +142,7 @@ func (p *ScanPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 	jobCtx := JobCtxBuilder{
 		JobName:     p.JobName,
 		PipelineCtx: pipelineCtx,
+		Installs:    p.Task.InstallCtx,
 		JobCtx: task.JobCtx{
 			Builds: []*task.Repository{repo},
 		},
@@ -154,6 +156,8 @@ func (p *ScanPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 		reaperContext.SonarServer = p.Task.SonarInfo.ServerAddress
 		reaperContext.SonarLogin = p.Task.SonarInfo.Token
 		reaperContext.ScannerType = ScanningTypeSonar
+		reaperContext.Scripts = append(reaperContext.Scripts, strings.Split(replaceWrapLine(p.Task.PreScript), "\n")...)
+		reaperContext.SonarCheckQualityGate = p.Task.CheckQualityGate
 	} else {
 		reaperContext.ScannerType = ScanningTypeOther
 		reaperContext.Scripts = append(reaperContext.Scripts, strings.Split(replaceWrapLine(p.Task.Script), "\n")...)

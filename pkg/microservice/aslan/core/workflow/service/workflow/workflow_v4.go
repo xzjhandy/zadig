@@ -17,18 +17,25 @@ limitations under the License.
 package workflow
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	templaterepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb/template"
 	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/collaboration"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/nsq"
+	commomtemplate "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/template"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/webhook"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow/job"
 	jobctl "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow/job"
@@ -39,13 +46,18 @@ import (
 
 const (
 	JobNameRegx  = "^[a-z][a-z0-9-]{0,31}$"
-	WorkflowRegx = "^[a-z0-9-]{1,32}$"
+	WorkflowRegx = "^[a-z0-9-]+$"
 )
 
 func CreateWorkflowV4(user string, workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger) error {
 	existedWorkflow, err := commonrepo.NewWorkflowV4Coll().Find(workflow.Name)
 	if err == nil {
-		errStr := fmt.Sprintf("workflow v4 [%s] 在项目 [%s] 中已经存在!", workflow.Name, existedWorkflow.Project)
+		errStr := fmt.Sprintf("与项目 [%s] 中的工作流 [%s] 标识相同", existedWorkflow.Project, existedWorkflow.DisplayName)
+		return e.ErrUpsertWorkflow.AddDesc(errStr)
+	}
+	existedWorkflows, _, _ := commonrepo.NewWorkflowV4Coll().List(&commonrepo.ListWorkflowV4Option{ProjectName: workflow.Project, DisplayName: workflow.DisplayName}, 0, 0)
+	if len(existedWorkflows) > 0 {
+		errStr := fmt.Sprintf("当前项目已存在工作流 [%s]", workflow.DisplayName)
 		return e.ErrUpsertWorkflow.AddDesc(errStr)
 	}
 	if err := LintWorkflowV4(workflow, logger); err != nil {
@@ -78,6 +90,13 @@ func UpdateWorkflowV4(name, user string, inputWorkflow *commonmodels.WorkflowV4,
 	if err != nil {
 		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", name, err)
 		return e.ErrFindWorkflow.AddErr(err)
+	}
+	if workflow.DisplayName != inputWorkflow.DisplayName {
+		existedWorkflows, _, _ := commonrepo.NewWorkflowV4Coll().List(&commonrepo.ListWorkflowV4Option{ProjectName: workflow.Project, DisplayName: inputWorkflow.DisplayName}, 0, 0)
+		if len(existedWorkflows) > 0 {
+			errStr := fmt.Sprintf("workflow v4 [%s] 展示名称在当前项目下重复!", inputWorkflow.DisplayName)
+			return e.ErrUpsertWorkflow.AddDesc(errStr)
+		}
 	}
 	if err := LintWorkflowV4(inputWorkflow, logger); err != nil {
 		return err
@@ -139,19 +158,47 @@ func DeleteWorkflowV4(name string, logger *zap.SugaredLogger) error {
 	return nil
 }
 
-func ListWorkflowV4(projectName, userID string, names []string, ignoreWorkflow bool, logger *zap.SugaredLogger) ([]*Workflow, error) {
+func ListWorkflowV4(projectName, viewName, userID string, names, v4Names []string, policyFound bool, logger *zap.SugaredLogger) ([]*Workflow, error) {
 	resp := make([]*Workflow, 0)
-	workflowV4List, _, err := commonrepo.NewWorkflowV4Coll().List(&commonrepo.ListWorkflowV4Option{
-		ProjectName: projectName,
-	}, 0, 0)
-	if err != nil {
-		logger.Errorf("Failed to list workflow v4, the error is: %s", err)
-		return resp, err
+	var err error
+	ignoreWorkflow := false
+	ignoreWorkflowV4 := false
+	if viewName == "" {
+		if policyFound && len(names) == 0 {
+			ignoreWorkflow = true
+		}
+		if policyFound && len(v4Names) == 0 {
+			ignoreWorkflowV4 = true
+		}
+	} else {
+		names, v4Names, err = filterWorkflowNamesByView(projectName, viewName, names, v4Names, policyFound)
+		if err != nil {
+			logger.Errorf("filterWorkflowNames error: %s", err)
+			return resp, err
+		}
+		if len(names) == 0 {
+			ignoreWorkflow = true
+		}
+		if len(v4Names) == 0 {
+			ignoreWorkflowV4 = true
+		}
+	}
+	workflowV4List := []*commonmodels.WorkflowV4{}
+	if !ignoreWorkflowV4 {
+		workflowV4List, _, err = commonrepo.NewWorkflowV4Coll().List(&commonrepo.ListWorkflowV4Option{
+			ProjectName: projectName,
+			Names:       v4Names,
+		}, 0, 0)
+		if err != nil {
+			logger.Errorf("Failed to list workflow v4, the error is: %s", err)
+			return resp, err
+		}
 	}
 
 	workflow := []*Workflow{}
 
-	if !ignoreWorkflow {
+	// distribute center only surpport custom workflow.
+	if !ignoreWorkflow && projectName != setting.EnterpriseProject {
 		workflow, err = ListWorkflows([]string{projectName}, userID, names, logger)
 		if err != nil {
 			return resp, err
@@ -163,31 +210,89 @@ func ListWorkflowV4(projectName, userID string, names []string, ignoreWorkflow b
 		workflowList = append(workflowList, wV4.Name)
 	}
 	resp = append(resp, workflow...)
+	workflowCMMap, err := collaboration.GetWorkflowCMMap([]string{projectName}, logger)
+	if err != nil {
+		return nil, err
+	}
 	tasks, _, err := commonrepo.NewworkflowTaskv4Coll().List(&commonrepo.ListWorkflowTaskV4Option{WorkflowNames: workflowList})
 	if err != nil {
 		return resp, err
 	}
+	workflowStatMap := getWorkflowStatMap(workflowList, config.WorkflowTypeV4)
 
 	for _, workflowModel := range workflowV4List {
 		stages := []string{}
 		for _, stage := range workflowModel.Stages {
+			if stage.Approval != nil && stage.Approval.Enabled {
+				stages = append(stages, "人工审核")
+			}
 			stages = append(stages, stage.Name)
+		}
+		var baseRefs []string
+		if cmSet, ok := workflowCMMap[collaboration.BuildWorkflowCMMapKey(workflowModel.Project, workflowModel.Name)]; ok {
+			for _, cm := range cmSet.List() {
+				baseRefs = append(baseRefs, cm)
+			}
 		}
 		workflow := &Workflow{
 			Name:          workflowModel.Name,
+			DisplayName:   workflowModel.DisplayName,
 			ProjectName:   workflowModel.Project,
 			EnabledStages: stages,
 			CreateTime:    workflowModel.CreateTime,
 			UpdateTime:    workflowModel.UpdateTime,
 			UpdateBy:      workflowModel.UpdatedBy,
-			WorkflowType:  "common_workflow",
+			WorkflowType:  setting.CustomWorkflowType,
 			Description:   workflowModel.Description,
+			BaseRefs:      baseRefs,
+			BaseName:      workflowModel.BaseName,
 		}
 		getRecentTaskV4Info(workflow, tasks)
+		setWorkflowStat(workflow, workflowStatMap)
 
 		resp = append(resp, workflow)
 	}
 	return resp, nil
+}
+
+func filterWorkflowNamesByView(projectName, viewName string, workflowNames, workflowV4Names []string, policyFound bool) ([]string, []string, error) {
+	if viewName == "" {
+		return workflowNames, workflowV4Names, nil
+	}
+	view, err := commonrepo.NewWorkflowViewColl().Find(projectName, viewName)
+	if err != nil {
+		return workflowNames, workflowV4Names, err
+	}
+	enabledWorkflow := []string{}
+	enabledWorkflowV4 := []string{}
+	for _, workflow := range view.Workflows {
+		if !workflow.Enabled {
+			continue
+		}
+		if workflow.WorkflowType == setting.CustomWorkflowType {
+			enabledWorkflowV4 = append(enabledWorkflowV4, workflow.WorkflowName)
+		} else {
+			enabledWorkflow = append(enabledWorkflow, workflow.WorkflowName)
+		}
+	}
+	if !policyFound {
+		return enabledWorkflow, enabledWorkflowV4, nil
+	}
+	return intersection(workflowNames, enabledWorkflow), intersection(workflowV4Names, enabledWorkflowV4), nil
+}
+
+func intersection(a, b []string) []string {
+	m := make(map[string]bool)
+	var intersection []string
+	for _, item := range a {
+		m[item] = true
+	}
+	for _, item := range b {
+		if _, ok := m[item]; ok {
+			intersection = append(intersection, item)
+		}
+	}
+	return intersection
 }
 
 func getRecentTaskV4Info(workflow *Workflow, tasks []*commonmodels.WorkflowTask) {
@@ -213,6 +318,8 @@ func getRecentTaskV4Info(workflow *Workflow, tasks []*commonmodels.WorkflowTask)
 			TaskID:       recentTask.TaskID,
 			PipelineName: recentTask.WorkflowName,
 			Status:       string(recentTask.Status),
+			TaskCreator:  recentTask.TaskCreator,
+			CreateTime:   recentTask.CreateTime,
 		}
 	}
 	if recentSucceedTask.TaskID > 0 {
@@ -220,6 +327,8 @@ func getRecentTaskV4Info(workflow *Workflow, tasks []*commonmodels.WorkflowTask)
 			TaskID:       recentSucceedTask.TaskID,
 			PipelineName: recentSucceedTask.WorkflowName,
 			Status:       string(recentSucceedTask.Status),
+			TaskCreator:  recentSucceedTask.TaskCreator,
+			CreateTime:   recentSucceedTask.CreateTime,
 		}
 	}
 	if recentFailedTask.TaskID > 0 {
@@ -227,6 +336,8 @@ func getRecentTaskV4Info(workflow *Workflow, tasks []*commonmodels.WorkflowTask)
 			TaskID:       recentFailedTask.TaskID,
 			PipelineName: recentFailedTask.WorkflowName,
 			Status:       string(recentFailedTask.Status),
+			TaskCreator:  recentFailedTask.TaskCreator,
+			CreateTime:   recentFailedTask.CreateTime,
 		}
 	}
 }
@@ -243,8 +354,8 @@ func ensureWorkflowV4Resp(encryptedKey string, workflow *commonmodels.WorkflowV4
 				for _, build := range spec.ServiceAndBuilds {
 					buildInfo, err := commonrepo.NewBuildColl().Find(&commonrepo.BuildFindOption{Name: build.BuildName})
 					if err != nil {
-						logger.Errorf(err.Error())
-						return e.ErrFindWorkflow.AddErr(err)
+						logger.Errorf("find build: %s error: %s", build.BuildName, err)
+						continue
 					}
 					kvs := buildInfo.PreBuild.Envs
 					if buildInfo.TemplateID != "" {
@@ -316,14 +427,19 @@ func LintWorkflowV4(workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger
 		return e.ErrUpsertWorkflow.AddErr(err)
 	}
 	if !match {
-		err := fmt.Errorf("workflow name should match %s", WorkflowRegx)
-		logger.Errorf(err.Error())
-		return e.ErrUpsertWorkflow.AddErr(err)
+		errMsg := "工作流标识支持小写字母、数字和中划线"
+		logger.Error(errMsg)
+		return e.ErrUpsertWorkflow.AddDesc(errMsg)
 	}
-	project, err := templaterepo.NewProductColl().Find(workflow.Project)
-	if err != nil {
-		logger.Errorf("Failed to get project %s, error: %v", workflow.Project, err)
-		return e.ErrUpsertWorkflow.AddErr(err)
+
+	project := &template.Product{}
+	// for deploy center workflow, it doesn't belongs to any project, so we use a specical project name to distinguish it.
+	if workflow.Project != setting.EnterpriseProject {
+		project, err = templaterepo.NewProductColl().Find(workflow.Project)
+		if err != nil {
+			logger.Errorf("Failed to get project %s, error: %v", workflow.Project, err)
+			return e.ErrUpsertWorkflow.AddErr(err)
+		}
 	}
 
 	if project.ProductFeature != nil {
@@ -334,8 +450,6 @@ func LintWorkflowV4(workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger
 	}
 	stageNameMap := make(map[string]bool)
 	jobNameMap := make(map[string]string)
-	// deploy job can not qoute a build job which runs after it.
-	buildJobNameMap := make(map[string]string)
 
 	reg, err := regexp.Compile(JobNameRegx)
 	if err != nil {
@@ -347,15 +461,9 @@ func LintWorkflowV4(workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger
 			stageNameMap[stage.Name] = true
 		} else {
 			logger.Errorf("duplicated stage name: %s", stage.Name)
-			return e.ErrUpsertWorkflow.AddDesc(fmt.Sprintf("duplicated job name: %s", stage.Name))
+			return e.ErrUpsertWorkflow.AddDesc(fmt.Sprintf("duplicated stage name: %s", stage.Name))
 		}
-		stageBuildJobNameMap := make(map[string]string)
 		for _, job := range stage.Jobs {
-			if !stage.Parallel {
-				buildJobNameMap[job.Name] = string(job.JobType)
-			} else {
-				stageBuildJobNameMap[job.Name] = string(job.JobType)
-			}
 			if match := reg.MatchString(job.Name); !match {
 				logger.Errorf("job name [%s] did not match %s", job.Name, JobNameRegx)
 				return e.ErrUpsertWorkflow.AddDesc(fmt.Sprintf("job name [%s] did not match %s", job.Name, JobNameRegx))
@@ -366,26 +474,10 @@ func LintWorkflowV4(workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger
 				logger.Errorf("duplicated job name: %s", job.Name)
 				return e.ErrUpsertWorkflow.AddDesc(fmt.Sprintf("duplicated job name: %s", job.Name))
 			}
-
-			if job.JobType == config.JobZadigDeploy {
-				spec := &commonmodels.ZadigDeployJobSpec{}
-				if err := commonmodels.IToiYaml(job.Spec, spec); err != nil {
-					logger.Errorf("decode job spec error: %v", err)
-					return e.ErrUpsertWorkflow.AddErr(err)
-				}
-				if spec.Source != config.SourceFromJob {
-					continue
-				}
-				jobType, ok := buildJobNameMap[spec.JobName]
-				if !ok || jobType != string(config.JobZadigBuild) {
-					errMsg := fmt.Sprintf("can not quote job %s in job %s", spec.JobName, job.Name)
-					logger.Error(errMsg)
-					return e.ErrUpsertWorkflow.AddDesc(errMsg)
-				}
+			if err := jobctl.LintJob(job, workflow); err != nil {
+				logger.Errorf("lint job %s failed: %v", job.Name, err)
+				return e.ErrUpsertWorkflow.AddErr(err)
 			}
-		}
-		for k, v := range stageBuildJobNameMap {
-			buildJobNameMap[k] = v
 		}
 	}
 	return nil
@@ -419,6 +511,9 @@ func CreateWebhookForWorkflowV4(workflowName string, input *commonmodels.Workflo
 		errMsg := fmt.Sprintf("failed to create webhook for workflow %s, the error is: %v", workflowName, err)
 		log.Error(errMsg)
 		return e.ErrCreateWebhook.AddDesc(errMsg)
+	}
+	if err := createGerritWebhook(input.MainRepo, workflowName); err != nil {
+		logger.Errorf("create gerrit webhook failed: %v", err)
 	}
 	return nil
 }
@@ -459,6 +554,13 @@ func UpdateWebhookForWorkflowV4(workflowName string, input *commonmodels.Workflo
 		errMsg := fmt.Sprintf("failed to update webhook for workflow %s, the error is: %v", workflowName, err)
 		log.Error(errMsg)
 		return e.ErrUpdateWebhook.AddDesc(errMsg)
+	}
+
+	if err := deleteGerritWebhook(existHook.MainRepo, workflowName); err != nil {
+		logger.Errorf("delete gerrit webhook failed: %v", err)
+	}
+	if err := createGerritWebhook(input.MainRepo, workflowName); err != nil {
+		logger.Errorf("create gerrit webhook failed: %v", err)
 	}
 	return nil
 }
@@ -536,5 +638,220 @@ func DeleteWebhookForWorkflowV4(workflowName, triggerName string, logger *zap.Su
 		log.Error(errMsg)
 		return e.ErrDeleteWebhook.AddDesc(errMsg)
 	}
+	if err := deleteGerritWebhook(existHook.MainRepo, workflowName); err != nil {
+		logger.Errorf("delete gerrit webhook failed: %v", err)
+	}
 	return nil
+}
+
+func BulkCopyWorkflowV4(args BulkCopyWorkflowArgs, username string, log *zap.SugaredLogger) error {
+	var workflows []commonrepo.WorkflowV4
+
+	for _, item := range args.Items {
+		workflows = append(workflows, commonrepo.WorkflowV4{
+			ProjectName: item.ProjectName,
+			Name:        item.Old,
+		})
+	}
+	oldWorkflows, err := commonrepo.NewWorkflowV4Coll().ListByWorkflows(commonrepo.ListWorkflowV4Opt{
+		Workflows: workflows,
+	})
+	if err != nil {
+		log.Error(err)
+		return e.ErrGetPipeline.AddErr(err)
+	}
+	workflowMap := make(map[string]*commonmodels.WorkflowV4)
+	for _, workflow := range oldWorkflows {
+		workflowMap[workflow.Project+"-"+workflow.Name] = workflow
+	}
+	var newWorkflows []*commonmodels.WorkflowV4
+	for _, workflow := range args.Items {
+		if item, ok := workflowMap[workflow.ProjectName+"-"+workflow.Old]; ok {
+			newItem := *item
+			newItem.UpdatedBy = username
+			newItem.Name = workflow.New
+			newItem.DisplayName = workflow.NewDisplayName
+			newItem.BaseName = workflow.BaseName
+			newItem.ID = primitive.NewObjectID()
+			// do not copy webhook triggers.
+			newItem.HookCtls = []*commonmodels.WorkflowV4Hook{}
+
+			newWorkflows = append(newWorkflows, &newItem)
+		} else {
+			return fmt.Errorf("workflow:%s not exist", item.Project+"-"+item.Name)
+		}
+	}
+	return commonrepo.NewWorkflowV4Coll().BulkCreate(newWorkflows)
+}
+
+func CreateCronForWorkflowV4(workflowName string, input *commonmodels.Cronjob, logger *zap.SugaredLogger) error {
+	if !input.ID.IsZero() {
+		return e.ErrUpsertCronjob.AddDesc("cronjob id is not empty")
+	}
+	input.Name = workflowName
+	input.Type = config.WorkflowV4Cronjob
+	err := commonrepo.NewCronjobColl().Create(input)
+	if err != nil {
+		msg := fmt.Sprintf("Failed to create cron job, error: %v", err)
+		log.Error(msg)
+		return errors.New(msg)
+	}
+	if !input.Enabled {
+		return nil
+	}
+
+	payload := &commonservice.CronjobPayload{
+		Name:    workflowName,
+		JobType: config.WorkflowV4Cronjob,
+		Action:  setting.TypeEnableCronjob,
+		JobList: []*commonmodels.Schedule{cronJobToSchedule(input)},
+	}
+
+	pl, _ := json.Marshal(payload)
+	if err := nsq.Publish(setting.TopicCronjob, pl); err != nil {
+		log.Errorf("Failed to publish to nsq topic: %s, the error is: %v", setting.TopicCronjob, err)
+		return e.ErrUpsertCronjob.AddDesc(err.Error())
+	}
+	return nil
+}
+
+func UpdateCronForWorkflowV4(input *commonmodels.Cronjob, logger *zap.SugaredLogger) error {
+	_, err := commonrepo.NewCronjobColl().GetByID(input.ID)
+	if err != nil {
+		msg := fmt.Sprintf("cron job not exist, error: %v", err)
+		log.Error(msg)
+		return errors.New(msg)
+	}
+	if err := commonrepo.NewCronjobColl().Update(input); err != nil {
+		msg := fmt.Sprintf("Failed to update cron job, error: %v", err)
+		log.Error(msg)
+		return errors.New(msg)
+	}
+	payload := &commonservice.CronjobPayload{
+		Name:    input.Name,
+		JobType: config.WorkflowV4Cronjob,
+		Action:  setting.TypeEnableCronjob,
+	}
+	if !input.Enabled {
+		payload.DeleteList = []string{input.ID.Hex()}
+	} else {
+		payload.JobList = []*commonmodels.Schedule{cronJobToSchedule(input)}
+	}
+
+	pl, _ := json.Marshal(payload)
+	if err := nsq.Publish(setting.TopicCronjob, pl); err != nil {
+		log.Errorf("Failed to publish to nsq topic: %s, the error is: %v", setting.TopicCronjob, err)
+		return e.ErrUpsertCronjob.AddDesc(err.Error())
+	}
+	return nil
+}
+
+func ListCronForWorkflowV4(workflowName string, logger *zap.SugaredLogger) ([]*commonmodels.Cronjob, error) {
+	crons, err := commonrepo.NewCronjobColl().List(&commonrepo.ListCronjobParam{
+		ParentName: workflowName,
+		ParentType: config.WorkflowV4Cronjob,
+	})
+	if err != nil {
+		logger.Errorf("Failed to list WorkflowV4 : %s cron jobs, the error is: %v", workflowName, err)
+		return crons, e.ErrUpsertCronjob.AddErr(err)
+	}
+	return crons, nil
+}
+
+func GetCronForWorkflowV4Preset(workflowName, cronID string, logger *zap.SugaredLogger) (*commonmodels.Cronjob, error) {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return nil, e.ErrUpsertCronjob.AddErr(err)
+	}
+	cronJob := &commonmodels.Cronjob{}
+	if cronID != "" {
+		id, err := primitive.ObjectIDFromHex(cronID)
+		if err != nil {
+			logger.Errorf("Failed to parse cron id: %s, the error is: %v", cronID, err)
+			return nil, e.ErrUpsertCronjob.AddErr(err)
+		}
+		cronJob, err = commonrepo.NewCronjobColl().GetByID(id)
+		if err != nil {
+			msg := fmt.Sprintf("cron job not exist, error: %v", err)
+			log.Error(msg)
+			return nil, errors.New(msg)
+		}
+	}
+
+	if err := job.MergeArgs(workflow, cronJob.WorkflowV4Args); err != nil {
+		errMsg := fmt.Sprintf("merge workflow args error: %v", err)
+		log.Error(errMsg)
+		return nil, e.ErrGetWebhook.AddDesc(errMsg)
+	}
+	cronJob.WorkflowV4Args = workflow
+	return cronJob, nil
+}
+
+func DeleteCronForWorkflowV4(workflowName, cronID string, logger *zap.SugaredLogger) error {
+	id, err := primitive.ObjectIDFromHex(cronID)
+	if err != nil {
+		logger.Errorf("Failed to parse cron id: %s, the error is: %v", cronID, err)
+		return e.ErrUpsertCronjob.AddErr(err)
+	}
+	job, err := commonrepo.NewCronjobColl().GetByID(id)
+	if err != nil {
+		msg := fmt.Sprintf("cron job not exist, error: %v", err)
+		log.Error(msg)
+		return errors.New(msg)
+	}
+	payload := &commonservice.CronjobPayload{
+		Name:       workflowName,
+		JobType:    config.WorkflowV4Cronjob,
+		Action:     setting.TypeEnableCronjob,
+		DeleteList: []string{job.ID.Hex()},
+	}
+
+	pl, _ := json.Marshal(payload)
+	if err := nsq.Publish(setting.TopicCronjob, pl); err != nil {
+		log.Errorf("Failed to publish to nsq topic: %s, the error is: %v", setting.TopicCronjob, err)
+		return e.ErrUpsertCronjob.AddDesc(err.Error())
+	}
+	if err := commonrepo.NewCronjobColl().Delete(&commonrepo.CronjobDeleteOption{IDList: []string{cronID}}); err != nil {
+		logger.Errorf("Failed to delete cron job: %s, the error is: %v", cronID, err)
+		return e.ErrUpsertCronjob.AddDesc(err.Error())
+	}
+	return nil
+}
+
+func cronJobToSchedule(input *commonmodels.Cronjob) *commonmodels.Schedule {
+	return &commonmodels.Schedule{
+		ID:             input.ID,
+		Number:         input.Number,
+		Frequency:      input.Frequency,
+		Time:           input.Time,
+		MaxFailures:    input.MaxFailure,
+		WorkflowV4Args: input.WorkflowV4Args,
+		Type:           config.ScheduleType(input.JobType),
+		Cron:           input.Cron,
+		Enabled:        input.Enabled,
+	}
+}
+
+func GetPatchParams(patchItem *commonmodels.PatchItem, logger *zap.SugaredLogger) ([]*commonmodels.Param, error) {
+	resp := []*commonmodels.Param{}
+	kvs, err := commomtemplate.GetYamlVariables(patchItem.PatchContent, logger)
+	if err != nil {
+		return resp, fmt.Errorf("get kv from content error: %s", err)
+	}
+	paramMap := map[string]*commonmodels.Param{}
+	for _, param := range patchItem.Params {
+		paramMap[param.Name] = param
+	}
+	for _, kv := range kvs {
+		if param, ok := paramMap[kv.Key]; ok {
+			resp = append(resp, param)
+			continue
+		}
+		resp = append(resp, &commonmodels.Param{
+			Name:       kv.Key,
+			ParamsType: "string",
+		})
+	}
+	return resp, nil
 }
