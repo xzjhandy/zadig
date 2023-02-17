@@ -26,6 +26,9 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/hashicorp/go-multierror"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	commonconfig "github.com/koderover/zadig/pkg/config"
 	configbase "github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
@@ -42,12 +45,14 @@ import (
 	policyservice "github.com/koderover/zadig/pkg/microservice/aslan/core/policy/service"
 	systemrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/system/repository/mongodb"
 	systemservice "github.com/koderover/zadig/pkg/microservice/aslan/core/system/service"
+	templateservice "github.com/koderover/zadig/pkg/microservice/aslan/core/templatestore/service"
 	workflowservice "github.com/koderover/zadig/pkg/microservice/aslan/core/workflow/service/workflow"
 	policydb "github.com/koderover/zadig/pkg/microservice/policy/core/repository/mongodb"
 	policybundle "github.com/koderover/zadig/pkg/microservice/policy/core/service/bundle"
 	configmongodb "github.com/koderover/zadig/pkg/microservice/systemconfig/core/email/repository/mongodb"
 	configservice "github.com/koderover/zadig/pkg/microservice/systemconfig/core/features/service"
 	userCore "github.com/koderover/zadig/pkg/microservice/user/core"
+	userdb "github.com/koderover/zadig/pkg/microservice/user/core/repository/mongodb"
 	"github.com/koderover/zadig/pkg/setting"
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	gormtool "github.com/koderover/zadig/pkg/tool/gorm"
@@ -55,8 +60,6 @@ import (
 	mongotool "github.com/koderover/zadig/pkg/tool/mongo"
 	"github.com/koderover/zadig/pkg/tool/rsa"
 	"github.com/koderover/zadig/pkg/types"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -236,6 +239,7 @@ func initDatabase() {
 		commonrepo.NewBasicImageColl(),
 		commonrepo.NewBuildColl(),
 		commonrepo.NewCallbackRequestColl(),
+		commonrepo.NewConfigurationManagementColl(),
 		commonrepo.NewCounterColl(),
 		commonrepo.NewCronjobColl(),
 		commonrepo.NewDeliveryActivityColl(),
@@ -248,6 +252,7 @@ func initDatabase() {
 		commonrepo.NewDeliveryVersionColl(),
 		commonrepo.NewDiffNoteColl(),
 		commonrepo.NewDindCleanColl(),
+		commonrepo.NewIMAppColl(),
 		commonrepo.NewFavoriteColl(),
 		commonrepo.NewGithubAppColl(),
 		commonrepo.NewHelmRepoColl(),
@@ -265,6 +270,7 @@ func initDatabase() {
 		commonrepo.NewRenderSetColl(),
 		commonrepo.NewS3StorageColl(),
 		commonrepo.NewServiceColl(),
+		commonrepo.NewProductionServiceColl(),
 		commonrepo.NewStrategyColl(),
 		commonrepo.NewStatsColl(),
 		commonrepo.NewSubscriptionColl(),
@@ -291,6 +297,8 @@ func initDatabase() {
 		commonrepo.NewWorkflowQueueColl(),
 		commonrepo.NewPluginRepoColl(),
 		commonrepo.NewWorkflowViewColl(),
+		commonrepo.NewWorkflowV4TemplateColl(),
+		commonrepo.NewVariableSetColl(),
 
 		systemrepo.NewAnnouncementColl(),
 		systemrepo.NewOperationLogColl(),
@@ -306,6 +314,9 @@ func initDatabase() {
 		policydb.NewRoleColl(),
 		policydb.NewRoleBindingColl(),
 		policydb.NewPolicyMetaColl(),
+
+		// user related db index
+		userdb.NewUserSettingColl(),
 	} {
 		wg.Add(1)
 		go func(r indexer) {
@@ -322,6 +333,7 @@ func initDatabase() {
 	commonrepo.NewInstallColl().InitInstallData(systemservice.InitInstallMap())
 	commonrepo.NewBasicImageColl().InitBasicImageData(systemservice.InitbasicImageInfos())
 	commonrepo.NewSystemSettingColl().InitSystemSettings()
+	templateservice.InitWorkflowTemplate()
 
 	if err := commonrepo.NewS3StorageColl().InitData(); err != nil {
 		log.Warnf("Failed to init S3 data: %s", err)

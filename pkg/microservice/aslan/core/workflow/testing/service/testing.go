@@ -153,6 +153,7 @@ type TestingOpt struct {
 	Schedules   *commonmodels.ScheduleCtrl `bson:"-"                      json:"schedules,omitempty"`
 	Repos       []*types.Repository        `bson:"repos"                  json:"repos"`
 	KeyVals     []*commonmodels.KeyVal     `bson:"key_vals"               json:"key_vals"`
+	ClusterID   string                     `bson:"cluster_id"             json:"cluster_id"`
 }
 
 func ListTestingOpt(productNames []string, testType string, log *zap.SugaredLogger) ([]*TestingOpt, error) {
@@ -208,6 +209,7 @@ func ListTestingOpt(productNames []string, testType string, log *zap.SugaredLogg
 			Schedules:   t.Schedules,
 			Repos:       t.Repos,
 			KeyVals:     t.PreTest.Envs,
+			ClusterID:   t.PreTest.ClusterID,
 		})
 	}
 
@@ -340,7 +342,7 @@ func GetHTMLTestReport(pipelineName, pipelineType, taskIDStr, testName string, l
 	if store.Provider == setting.ProviderSourceAli {
 		forcedPathStyle = false
 	}
-	client, err := s3tool.NewClient(store.Endpoint, store.Ak, store.Sk, store.Insecure, forcedPathStyle)
+	client, err := s3tool.NewClient(store.Endpoint, store.Ak, store.Sk, store.Region, store.Insecure, forcedPathStyle)
 	if err != nil {
 		log.Errorf("download html test report error: %s", err)
 		return "", e.ErrGetTestReport.AddErr(err)
@@ -427,7 +429,7 @@ func GetWorkflowV4HTMLTestReport(workflowName, jobName string, taskID int64, log
 	if store.Provider == setting.ProviderSourceAli {
 		forcedPathStyle = false
 	}
-	client, err := s3tool.NewClient(store.Endpoint, store.Ak, store.Sk, store.Insecure, forcedPathStyle)
+	client, err := s3tool.NewClient(store.Endpoint, store.Ak, store.Sk, store.Region, store.Insecure, forcedPathStyle)
 	if err != nil {
 		log.Errorf("download html test report error: %s", err)
 		return "", e.ErrGetTestReport.AddErr(err)

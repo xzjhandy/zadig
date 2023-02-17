@@ -40,6 +40,7 @@ import (
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
 	"github.com/koderover/zadig/pkg/setting"
 	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
+	"github.com/koderover/zadig/pkg/tool/kube/label"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	"github.com/koderover/zadig/pkg/types"
 )
@@ -55,6 +56,7 @@ func InitializeBuildTaskPlugin(taskType config.TaskType) TaskPlugin {
 		kubeClient: krkubeclient.Client(),
 		clientset:  krkubeclient.Clientset(),
 		restConfig: krkubeclient.RESTConfig(),
+		apiReader:  krkubeclient.APIReader(),
 	}
 }
 
@@ -67,8 +69,10 @@ type BuildTaskPlugin struct {
 	kubeClient    client.Client
 	clientset     kubernetes.Interface
 	restConfig    *rest.Config
+	apiReader     client.Reader
 	Task          *task.Build
 	Log           *zap.SugaredLogger
+	Timeout       <-chan time.Time
 
 	ack func()
 }
@@ -122,7 +126,7 @@ func (p *BuildTaskPlugin) SetBuildStatusCompleted(status config.Status) {
 	p.Task.BuildStatus.EndTime = time.Now().Unix()
 }
 
-//TODO: Binded Archive File logic
+// TODO: Binded Archive File logic
 func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineCtx *task.PipelineCtx, serviceName string) {
 	if p.Task.CacheEnable && !pipelineTask.ConfigPayload.ResetCache {
 		pipelineCtx.CacheEnable = true
@@ -141,7 +145,7 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 	default:
 		p.KubeNamespace = setting.AttachedClusterNamespace
 
-		crClient, clientset, restConfig, err := GetK8sClients(pipelineTask.ConfigPayload.HubServerAddr, p.Task.ClusterID)
+		crClient, clientset, restConfig, apiReader, err := GetK8sClients(pipelineTask.ConfigPayload.HubServerAddr, p.Task.ClusterID)
 		if err != nil {
 			p.Log.Error(err)
 			p.Task.TaskStatus = config.StatusFailed
@@ -153,6 +157,7 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 		p.kubeClient = crClient
 		p.clientset = clientset
 		p.restConfig = restConfig
+		p.apiReader = apiReader
 	}
 
 	dockerhosts := common.NewDockerHosts(pipelineTask.ConfigPayload.HubServerAddr, p.Log)
@@ -179,6 +184,8 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 		}
 	}
 	pipelineCtx.DockerHost = dockerHost
+
+	pipelineCtx.UseHostDockerDaemon = p.Task.UseHostDockerDaemon
 
 	if pipelineTask.Type == config.WorkflowType {
 		envName := pipelineTask.WorkflowArgs.Namespace
@@ -279,7 +286,7 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 		return
 	}
 
-	jobLabel := &JobLabel{
+	jobLabel := &label.JobLabel{
 		PipelineName: pipelineTask.PipelineName,
 		ServiceName:  serviceName,
 		TaskID:       pipelineTask.TaskID,
@@ -348,8 +355,10 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 		p.Log.Infof("Job %s:%d does not exist. Create.", pipelineTask.PipelineName, pipelineTask.TaskID)
 
 		jobImage := getReaperImage(pipelineTask.ConfigPayload.Release.ReaperImage, p.Task.BuildOS, p.Task.ImageFrom)
+		p.Task.Registries = getMatchedRegistries(jobImage, p.Task.Registries)
 
 		//Resource request default value is LOW
+
 		job, err := buildJob(p.Type(), jobImage, p.JobName, serviceName, p.Task.ClusterID, pipelineTask.ConfigPayload.Build.KubeNamespace, p.Task.ResReq, p.Task.ResReqSpec, pipelineCtx, pipelineTask, p.Task.Registries)
 		if err != nil {
 			msg := fmt.Sprintf("create build job context error: %v", err)
@@ -384,13 +393,19 @@ func (p *BuildTaskPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipe
 	}
 	p.Log.Infof("succeed to create build job %s", p.JobName)
 
-	p.Task.TaskStatus = waitJobReady(ctx, p.KubeNamespace, p.JobName, p.kubeClient, p.Log)
+	p.Timeout = time.After(time.Duration(p.TaskTimeout()) * time.Second)
+	p.Task.TaskStatus, err = waitJobReady(ctx, p.KubeNamespace, p.JobName, p.kubeClient, p.apiReader, p.Timeout, p.Log)
+	if err != nil {
+		p.Task.Error = err.Error()
+	}
 }
 
 func (p *BuildTaskPlugin) Wait(ctx context.Context) {
-	status := waitJobEndWithFile(ctx, p.TaskTimeout(), p.KubeNamespace, p.JobName, true, p.kubeClient, p.clientset, p.restConfig, p.Log)
+	status, err := waitJobEndWithFile(ctx, p.TaskTimeout(), p.Timeout, p.KubeNamespace, p.JobName, true, p.kubeClient, p.clientset, p.restConfig, p.Log)
 	p.SetBuildStatusCompleted(status)
-
+	if err != nil {
+		p.Task.Error = err.Error()
+	}
 	if status == config.StatusPassed {
 		if p.Task.DockerBuildStatus == nil {
 			p.Task.DockerBuildStatus = &task.DockerBuildStatus{}
@@ -417,7 +432,7 @@ func (p *BuildTaskPlugin) Wait(ctx context.Context) {
 }
 
 func (p *BuildTaskPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serviceName string) {
-	jobLabel := &JobLabel{
+	jobLabel := &label.JobLabel{
 		PipelineName: pipelineTask.PipelineName,
 		ServiceName:  serviceName,
 		TaskID:       pipelineTask.TaskID,
@@ -441,7 +456,9 @@ func (p *BuildTaskPlugin) Complete(ctx context.Context, pipelineTask *task.Task,
 	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.Task.ClusterID, p.FileName, jobLabel, p.kubeClient)
 	if err != nil {
 		p.Log.Error(err)
-		p.Task.Error = err.Error()
+		if p.Task.Error == "" {
+			p.Task.Error = err.Error()
+		}
 		return
 	}
 

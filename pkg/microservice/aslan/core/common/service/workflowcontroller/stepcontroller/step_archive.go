@@ -21,7 +21,7 @@ import (
 	"fmt"
 
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v2"
 
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
@@ -37,11 +37,11 @@ type archiveCtl struct {
 func NewArchiveCtl(stepTask *commonmodels.StepTask, log *zap.SugaredLogger) (*archiveCtl, error) {
 	yamlString, err := yaml.Marshal(stepTask.Spec)
 	if err != nil {
-		return nil, fmt.Errorf("marshal tool install spec error: %v", err)
+		return nil, fmt.Errorf("marshal archive spec error: %v", err)
 	}
 	archiveSpec := &step.StepArchiveSpec{}
 	if err := yaml.Unmarshal(yamlString, &archiveSpec); err != nil {
-		return nil, fmt.Errorf("unmarshal git spec error: %v", err)
+		return nil, fmt.Errorf("unmarshal archive spec error: %v", err)
 	}
 	stepTask.Spec = archiveSpec
 	return &archiveCtl{archiveSpec: archiveSpec, log: log, step: stepTask}, nil
@@ -84,6 +84,7 @@ func modelS3toS3(modelS3 *commonmodels.S3Storage) *step.S3 {
 		Subfolder: modelS3.Subfolder,
 		Insecure:  modelS3.Insecure,
 		Provider:  modelS3.Provider,
+		Region:    modelS3.Region,
 	}
 	if modelS3.Insecure {
 		resp.Protocol = "http"

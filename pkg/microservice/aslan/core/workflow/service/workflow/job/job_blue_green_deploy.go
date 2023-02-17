@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
+	"time"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
@@ -27,7 +29,6 @@ import (
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	"github.com/koderover/zadig/pkg/tool/kube/getter"
 	"github.com/koderover/zadig/pkg/tool/log"
-	"helm.sh/helm/v3/pkg/time"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
@@ -121,6 +122,7 @@ func (j *BlueGreenDeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, erro
 		target.BlueWorkloadName = getBlueWorkloadName(deployment.Name, version)
 		task := &commonmodels.JobTask{
 			Name:    jobNameFormat(j.job.Name + "-" + target.K8sServiceName),
+			Key:     strings.Join([]string{j.job.Name, target.K8sServiceName}, "."),
 			JobType: string(config.JobK8sBlueGreenDeploy),
 			Spec: &commonmodels.JobTaskBlueGreenDeploySpec{
 				Namespace:          j.spec.Namespace,

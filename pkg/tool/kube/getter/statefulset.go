@@ -24,12 +24,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+var StatefulSetGVK = schema.GroupVersionKind{
+	Group:   "apps",
+	Kind:    "StatefulSet",
+	Version: "v1",
+}
+
 func GetStatefulSet(ns, name string, cl client.Client) (*appsv1.StatefulSet, bool, error) {
 	ss := &appsv1.StatefulSet{}
 	found, err := GetResourceInCache(ns, name, ss, cl)
 	if err != nil || !found {
 		ss = nil
 	}
+	setStatefulSetGVK(ss)
 
 	return ss, found, err
 }
@@ -43,6 +50,7 @@ func ListStatefulSets(ns string, selector labels.Selector, cl client.Client) ([]
 
 	var res []*appsv1.StatefulSet
 	for i := range ss.Items {
+		setStatefulSetGVK(&ss.Items[i])
 		res = append(res, &ss.Items[i])
 	}
 	return res, err
@@ -55,29 +63,30 @@ func ListStatefulSetsWithCache(selector labels.Selector, lister informers.Shared
 	return lister.Apps().V1().StatefulSets().Lister().List(selector)
 }
 
+func GetStatefulSetByNameWWithCache(name, namespace string, lister informers.SharedInformerFactory) (*appsv1.StatefulSet, error) {
+	return lister.Apps().V1().StatefulSets().Lister().StatefulSets(namespace).Get(name)
+}
+
 func ListStatefulSetsYaml(ns string, selector labels.Selector, cl client.Client) ([][]byte, error) {
-	gvk := schema.GroupVersionKind{
-		Group:   "apps",
-		Kind:    "StatefulSet",
-		Version: "v1",
-	}
-	return ListResourceYamlInCache(ns, selector, nil, gvk, cl)
+	return ListResourceYamlInCache(ns, selector, nil, StatefulSetGVK, cl)
 }
 
 func GetStatefulSetYaml(ns string, name string, cl client.Client) ([]byte, bool, error) {
-	gvk := schema.GroupVersionKind{
-		Group:   "apps",
-		Kind:    "StatefulSet",
-		Version: "v1",
-	}
-	return GetResourceYamlInCache(ns, name, gvk, cl)
+	return GetResourceYamlInCache(ns, name, StatefulSetGVK, cl)
 }
 
 func GetStatefulSetYamlFormat(ns string, name string, cl client.Client) ([]byte, bool, error) {
+	return GetResourceYamlInCacheFormat(ns, name, StatefulSetGVK, cl)
+}
+
+func setStatefulSetGVK(statefulSet *appsv1.StatefulSet) {
+	if statefulSet == nil {
+		return
+	}
 	gvk := schema.GroupVersionKind{
 		Group:   "apps",
 		Kind:    "StatefulSet",
 		Version: "v1",
 	}
-	return GetResourceYamlInCacheFormat(ns, name, gvk, cl)
+	statefulSet.SetGroupVersionKind(gvk)
 }

@@ -34,6 +34,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		chart.GET("/:name/variables", GetTemplateVariables)
 		chart.POST("", AddChartTemplate)
 		chart.PUT("/:name", UpdateChartTemplate)
+		chart.GET("/:name/reference", GetChartTemplateReference)
 		chart.POST("/:name/reference", SyncChartTemplateReference)
 		chart.PUT("/:name/variables", UpdateChartTemplateVariables)
 		chart.DELETE("/:name", RemoveChartTemplate)
@@ -60,8 +61,9 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		yaml.DELETE("/:id", DeleteYamlTemplate)
 		yaml.GET("/:id/reference", GetYamlTemplateReference)
 		yaml.POST("/:id/reference", SyncYamlTemplateReference)
-		yaml.POST("/getVariables", GetYamlTemplateVariables) //Deprecated
 		yaml.POST("/validateVariable", ValidateTemplateVariables)
+		yaml.POST("/extractVariable", ExtractTemplateVariables)
+		yaml.POST("/flatkvs", GetFlatKvs)
 	}
 
 	build := router.Group("build")
@@ -71,5 +73,15 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		build.GET("", ListBuildTemplates)
 		build.GET("/:id", GetBuildTemplate)
 		build.DELETE("/:id", RemoveBuildTemplate)
+		build.GET("/:id/reference", GetBuildTemplateReference)
+	}
+
+	workflow := router.Group("workflow")
+	{
+		workflow.POST("", CreateWorkflowTemplate)
+		workflow.PUT("", UpdateWorkflowTemplate)
+		workflow.GET("", ListWorkflowTemplate)
+		workflow.GET("/:id", GetWorkflowTemplateByID)
+		workflow.DELETE("/:id", DeleteWorkflowTemplateByID)
 	}
 }

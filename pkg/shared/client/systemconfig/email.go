@@ -17,7 +17,10 @@ limitations under the License.
 package systemconfig
 
 import (
-	"github.com/koderover/zadig/pkg/tool/httpclient"
+	"fmt"
+
+	emailservice "github.com/koderover/zadig/pkg/microservice/systemconfig/core/email/service"
+	"github.com/koderover/zadig/pkg/tool/log"
 )
 
 type Email struct {
@@ -28,12 +31,18 @@ type Email struct {
 }
 
 func (c *Client) GetEmailHost() (*Email, error) {
-	url := "/emails/host/internal/"
-
-	res := &Email{}
-	_, err := c.Get(url, httpclient.SetResult(res))
+	resp, err := emailservice.GetEmailHostInternal(log.SugaredLogger())
 	if err != nil {
 		return nil, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("failed to find email host config")
+	}
+	res := &Email{
+		Name:     resp.Name,
+		Port:     resp.Port,
+		UserName: resp.Username,
+		Password: resp.Password,
 	}
 
 	return res, err

@@ -71,19 +71,25 @@ func UpdateService(c *gin.Context) {
 		return
 	}
 
+	if c.Param("serviceName") != svcRev.ServiceName {
+		ctx.Err = e.ErrInvalidParam.AddDesc("serviceName not match")
+		return
+	}
+
 	args := &service.SvcOptArgs{
-		EnvName:     envName,
-		ProductName: projectName,
-		ServiceName: c.Param("serviceName"),
-		ServiceType: c.Query("serviceType"),
-		ServiceRev:  svcRev,
-		UpdateBy:    ctx.UserName,
+		EnvName:           envName,
+		ProductName:       projectName,
+		ServiceName:       c.Param("serviceName"),
+		ServiceType:       svcRev.Type,
+		ServiceRev:        svcRev,
+		UpdateBy:          ctx.UserName,
+		UpdateServiceTmpl: svcRev.UpdateServiceTmpl,
 	}
 
 	ctx.Err = service.UpdateService(args, ctx.Logger)
 }
 
-func RestartNewService(c *gin.Context) {
+func RestartWorkload(c *gin.Context) {
 	ctx := internalhandler.NewContext(c)
 	defer func() { internalhandler.JSONResponse(c, ctx) }()
 
@@ -145,34 +151,6 @@ func ScaleNewService(c *gin.Context) {
 		Name:        name,
 		Number:      number,
 	}, ctx.Logger)
-}
-
-func ScaleService(c *gin.Context) {
-	ctx := internalhandler.NewContext(c)
-	defer func() { internalhandler.JSONResponse(c, ctx) }()
-
-	envName := c.Param("name")
-	projectName := c.Query("projectName")
-	internalhandler.InsertDetailedOperationLog(c, ctx.UserName,
-		projectName, setting.OperationSceneEnv,
-		"伸缩", "环境-服务", fmt.Sprintf("环境名称:%s,服务名称:%s", envName, c.Param("serviceName")),
-		"", ctx.Logger, envName)
-
-	number, err := strconv.Atoi(c.Query("number"))
-	if err != nil {
-		ctx.Err = e.ErrInvalidParam.AddDesc("invalid number format")
-		return
-	}
-
-	serviceName := c.Param("serviceName")
-
-	ctx.Err = service.ScaleService(
-		envName,
-		projectName,
-		serviceName,
-		number,
-		ctx.Logger,
-	)
 }
 
 func GetServiceContainer(c *gin.Context) {

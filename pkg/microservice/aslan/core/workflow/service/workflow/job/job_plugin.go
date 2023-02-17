@@ -19,6 +19,8 @@ package job
 import (
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
@@ -81,6 +83,7 @@ func (j *PluginJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 	}
 	jobTask := &commonmodels.JobTask{
 		Name:    j.job.Name,
+		Key:     j.job.Name,
 		JobType: string(config.JobPlugin),
 		Spec:    jobTaskSpec,
 		Outputs: j.spec.Plugin.Outputs,
@@ -90,6 +93,7 @@ func (j *PluginJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		return resp, err
 	}
 	jobTaskSpec.Properties.Registries = registries
+	jobTaskSpec.Properties.ShareStorageDetails = getShareStorageDetail(j.workflow.ShareStorages, j.spec.Properties.ShareStorageInfo, j.workflow.Name, taskID)
 
 	renderedParams := []*commonmodels.Param{}
 	for _, param := range j.spec.Plugin.Inputs {
@@ -116,5 +120,21 @@ func renderPlugin(plugin *commonmodels.PluginTemplate, inputs []*commonmodels.Pa
 }
 
 func (j *PluginJob) LintJob() error {
-	return nil
+	j.spec = &commonmodels.PluginJobSpec{}
+	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+		return err
+	}
+	return checkOutputNames(j.spec.Plugin.Outputs)
+}
+
+func (j *PluginJob) GetOutPuts(log *zap.SugaredLogger) []string {
+	resp := []string{}
+	j.spec = &commonmodels.PluginJobSpec{}
+	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+		return resp
+	}
+
+	jobKey := j.job.Name
+	resp = append(resp, getOutputKey(jobKey, j.spec.Plugin.Outputs)...)
+	return resp
 }

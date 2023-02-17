@@ -137,7 +137,7 @@ func (j *TestingJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 
 	defaultS3, err := commonrepo.NewS3StorageColl().FindDefault()
 	if err != nil {
-		return resp, err
+		return resp, fmt.Errorf("failed to find default s3 storage, error: %v", err)
 	}
 
 	for _, testing := range j.spec.TestModules {
@@ -156,23 +156,26 @@ func (j *TestingJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		jobTaskSpec := &commonmodels.JobTaskFreestyleSpec{}
 		jobTask := &commonmodels.JobTask{
 			Name:    jobNameFormat(testing.Name + "-" + j.job.Name + "-" + rand.String(5)),
+			Key:     strings.Join([]string{j.job.Name, testing.Name}, "."),
 			JobType: string(config.JobZadigTesting),
 			Spec:    jobTaskSpec,
 			Timeout: int64(testingInfo.Timeout),
+			Outputs: testingInfo.Outputs,
 		}
 		jobTaskSpec.Properties = commonmodels.JobProperties{
-			Timeout:         int64(testingInfo.Timeout),
-			ResourceRequest: testingInfo.PreTest.ResReq,
-			ResReqSpec:      testingInfo.PreTest.ResReqSpec,
-			CustomEnvs:      renderKeyVals(testing.KeyVals, testingInfo.PreTest.Envs),
-			ClusterID:       testingInfo.PreTest.ClusterID,
-			BuildOS:         basicImage.Value,
-			ImageFrom:       testingInfo.PreTest.ImageFrom,
-			Registries:      registries,
+			Timeout:             int64(testingInfo.Timeout),
+			ResourceRequest:     testingInfo.PreTest.ResReq,
+			ResReqSpec:          testingInfo.PreTest.ResReqSpec,
+			CustomEnvs:          renderKeyVals(testing.KeyVals, testingInfo.PreTest.Envs),
+			ClusterID:           testingInfo.PreTest.ClusterID,
+			BuildOS:             basicImage.Value,
+			ImageFrom:           testingInfo.PreTest.ImageFrom,
+			Registries:          registries,
+			ShareStorageDetails: getShareStorageDetail(j.workflow.ShareStorages, testing.ShareStorageInfo, j.workflow.Name, taskID),
 		}
 		clusterInfo, err := commonrepo.NewK8SClusterColl().Get(testingInfo.PreTest.ClusterID)
 		if err != nil {
-			return resp, err
+			return resp, fmt.Errorf("failed to find cluster: %s, error: %v", testingInfo.PreTest.ClusterID, err)
 		}
 
 		if clusterInfo.Cache.MediumType == "" {
@@ -210,7 +213,7 @@ func (j *TestingJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			Name:     testing.Name + "-git",
 			JobName:  jobTask.Name,
 			StepType: config.StepGit,
-			Spec:     step.StepGitSpec{Repos: renderRepos(testing.Repos, testingInfo.Repos)},
+			Spec:     step.StepGitSpec{Repos: renderRepos(testing.Repos, testingInfo.Repos, jobTaskSpec.Properties.Envs)},
 		}
 		jobTaskSpec.Steps = append(jobTaskSpec.Steps, gitStep)
 
@@ -220,7 +223,7 @@ func (j *TestingJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			JobName:  jobTask.Name,
 			StepType: config.StepShell,
 			Spec: &step.StepShellSpec{
-				Scripts: strings.Split(replaceWrapLine(testingInfo.Scripts), "\n"),
+				Scripts: append(strings.Split(replaceWrapLine(testingInfo.Scripts), "\n"), outputScript(testingInfo.Outputs)...),
 			},
 		}
 		jobTaskSpec.Steps = append(jobTaskSpec.Steps, shellStep)
@@ -291,6 +294,28 @@ func (j *TestingJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 
 func (j *TestingJob) LintJob() error {
 	return nil
+}
+
+func (j *TestingJob) GetOutPuts(log *zap.SugaredLogger) []string {
+	resp := []string{}
+	j.spec = &commonmodels.ZadigTestingJobSpec{}
+	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+		return resp
+	}
+	testNames := []string{}
+	for _, testing := range j.spec.TestModules {
+		testNames = append(testNames, testing.Name)
+	}
+	testingInfos, err := commonrepo.NewTestingColl().List(&commonrepo.ListTestOption{TestNames: testNames})
+	if err != nil {
+		log.Errorf("list testinfos error: %v", err)
+		return resp
+	}
+	for _, testInfo := range testingInfos {
+		jobKey := strings.Join([]string{j.job.Name, testInfo.Name}, ".")
+		resp = append(resp, getOutputKey(jobKey, testInfo.Outputs)...)
+	}
+	return resp
 }
 
 func getTestingJobVariables(repos []*types.Repository, taskID int64, project, workflowName, testingProject, testingName string, log *zap.SugaredLogger) []*commonmodels.KeyVal {

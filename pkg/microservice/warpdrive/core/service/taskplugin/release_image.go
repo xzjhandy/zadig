@@ -23,19 +23,21 @@ import (
 	"strconv"
 	"time"
 
+	helmclient "github.com/mittwald/go-helm-client"
+	"github.com/pkg/errors"
+	"helm.sh/helm/v3/pkg/releaseutil"
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/labels"
+
 	configbase "github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/taskplugin/s3"
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	helmtool "github.com/koderover/zadig/pkg/tool/helmclient"
 	"github.com/koderover/zadig/pkg/tool/httpclient"
 	"github.com/koderover/zadig/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/pkg/tool/kube/label"
 	s3tool "github.com/koderover/zadig/pkg/tool/s3"
 	fsutil "github.com/koderover/zadig/pkg/util/fs"
-	helmclient "github.com/mittwald/go-helm-client"
-	"github.com/pkg/errors"
-	"helm.sh/helm/v3/pkg/releaseutil"
-	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/apimachinery/pkg/labels"
 
 	"go.uber.org/zap"
 	yaml "gopkg.in/yaml.v3"
@@ -78,6 +80,7 @@ type ReleaseImagePlugin struct {
 	Log           *zap.SugaredLogger
 	httpClient    *httpclient.Client
 	StorageURI    string
+	Timeout       <-chan time.Time
 }
 
 func (p *ReleaseImagePlugin) SetAckFunc(func()) {
@@ -190,7 +193,7 @@ func (p *ReleaseImagePlugin) Run(ctx context.Context, pipelineTask *task.Task, p
 	// 重置错误信息
 	p.Task.Error = ""
 
-	jobLabel := &JobLabel{
+	jobLabel := &label.JobLabel{
 		PipelineName: pipelineTask.PipelineName,
 		ServiceName:  serviceName,
 		TaskID:       pipelineTask.TaskID,
@@ -246,6 +249,7 @@ func (p *ReleaseImagePlugin) Run(ctx context.Context, pipelineTask *task.Task, p
 		p.Task.Error = msg
 		return
 	}
+	p.Timeout = time.After(time.Duration(p.TaskTimeout()) * time.Second)
 	p.Log.Infof("succeed to create image job %s", p.JobName)
 }
 
@@ -263,7 +267,7 @@ func (p *ReleaseImagePlugin) Wait(ctx context.Context) {
 			p.SetStatus(config.StatusPassed)
 		}
 	}()
-	status = waitJobEnd(ctx, p.TaskTimeout(), p.KubeNamespace, p.JobName, p.kubeClient, p.clientset, p.restConfig, p.Log)
+	status, err = waitJobEnd(ctx, p.TaskTimeout(), p.Timeout, p.KubeNamespace, p.JobName, p.kubeClient, p.clientset, p.restConfig, p.Log)
 	distributeEndtime := time.Now().Unix()
 	for _, distribute := range p.Task.DistributeInfo {
 		distribute.DistributeEndTime = distributeEndtime
@@ -271,7 +275,7 @@ func (p *ReleaseImagePlugin) Wait(ctx context.Context) {
 	}
 	// if the distribution stage failed, then deploy part won't run
 	if status != config.StatusPassed {
-		err = errors.New("failed to distribute images to the repository")
+		err = errors.Errorf("failed to distribute images to the repository, err: %v", err)
 		return
 	}
 	// otherwise, run any deploy subtasks
@@ -319,9 +323,16 @@ DistributeLoop:
 				}
 			}
 			if serviceInfo.WorkloadType == "" {
-				selector = labels.Set{setting.ProductLabel: p.Task.ProductName, setting.ServiceLabel: distribute.DeployServiceName}.AsSelector()
 
 				var deployments []*appsv1.Deployment
+				var statefulSets []*appsv1.StatefulSet
+				deployments, statefulSets, err = fetchRelatedWorkloads(ctx, distribute.DeployEnv, distribute.DeployNamespace, p.Task.ProductName, distribute.DeployServiceName, p.kubeClient, p.httpClient, p.Log)
+				if err != nil {
+					return
+				}
+
+				selector = labels.Set{setting.ProductLabel: p.Task.ProductName, setting.ServiceLabel: distribute.DeployServiceName}.AsSelector()
+
 				deployments, err = getter.ListDeployments(distribute.DeployNamespace, selector, p.kubeClient)
 				if err != nil {
 					err = errors.WithMessage(err, "failed to get deployment")
@@ -330,7 +341,6 @@ DistributeLoop:
 					continue
 				}
 
-				var statefulSets []*appsv1.StatefulSet
 				statefulSets, err = getter.ListStatefulSets(distribute.DeployNamespace, selector, p.kubeClient)
 				if err != nil {
 					err = errors.WithMessage(err, "failed to get statefulset")
@@ -383,7 +393,11 @@ DistributeLoop:
 				switch serviceInfo.WorkloadType {
 				case setting.StatefulSet:
 					var statefulSet *appsv1.StatefulSet
-					statefulSet, _, err = getter.GetStatefulSet(distribute.DeployNamespace, distribute.DeployServiceName, p.kubeClient)
+					var found bool
+					statefulSet, found, err = getter.GetStatefulSet(distribute.DeployNamespace, distribute.DeployServiceName, p.kubeClient)
+					if !found {
+						err = fmt.Errorf("statefulset %s not found", distribute.DeployServiceName)
+					}
 					if err != nil {
 						err = errors.WithMessage(err, "failed to get statefulset")
 						distribute.DeployStatus = string(config.StatusFailed)
@@ -408,7 +422,11 @@ DistributeLoop:
 					}
 				case setting.Deployment:
 					var deployment *appsv1.Deployment
-					deployment, _, err = getter.GetDeployment(distribute.DeployNamespace, distribute.DeployServiceName, p.kubeClient)
+					var found bool
+					deployment, found, err = getter.GetDeployment(distribute.DeployNamespace, distribute.DeployServiceName, p.kubeClient)
+					if !found {
+						err = fmt.Errorf("deployment %s not found", distribute.DeployServiceName)
+					}
 					if err != nil {
 						err = errors.WithMessage(err, "failed to get deployment")
 						distribute.DeployStatus = string(config.StatusFailed)
@@ -762,7 +780,7 @@ DistributeLoop:
 
 // Complete ...
 func (p *ReleaseImagePlugin) Complete(ctx context.Context, pipelineTask *task.Task, serviceName string) {
-	jobLabel := &JobLabel{
+	jobLabel := &label.JobLabel{
 		PipelineName: pipelineTask.PipelineName,
 		ServiceName:  serviceName,
 		TaskID:       pipelineTask.TaskID,
@@ -772,12 +790,11 @@ func (p *ReleaseImagePlugin) Complete(ctx context.Context, pipelineTask *task.Ta
 
 	// 清理用户取消和超时的任务
 	defer func() {
-		if p.Task.TaskStatus == config.StatusCancelled || p.Task.TaskStatus == config.StatusTimeout {
-			if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
-				p.Log.Error(err)
-				p.Task.Error = err.Error()
-			}
-			return
+		if err := ensureDeleteConfigMap(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+			p.Log.Error(err)
+		}
+		if err := ensureDeleteJob(p.KubeNamespace, jobLabel, p.kubeClient); err != nil {
+			p.Log.Error(err)
 		}
 	}()
 
@@ -913,7 +930,7 @@ func (p *ReleaseImagePlugin) downloadService(productName, serviceName, storageUR
 	if s3Storage.Provider == setting.ProviderSourceAli {
 		forcedPathStyle = false
 	}
-	s3Client, err := s3tool.NewClient(s3Storage.Endpoint, s3Storage.Ak, s3Storage.Sk, s3Storage.Insecure, forcedPathStyle)
+	s3Client, err := s3tool.NewClient(s3Storage.Endpoint, s3Storage.Ak, s3Storage.Sk, s3Storage.Region, s3Storage.Insecure, forcedPathStyle)
 	if err != nil {
 		p.Log.Errorf("failed to create s3 client, err: %s", err)
 		return "", err

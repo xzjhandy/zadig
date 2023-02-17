@@ -22,6 +22,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
+	"github.com/koderover/zadig/pkg/types"
 )
 
 type WorkflowTask struct {
@@ -34,8 +35,11 @@ type WorkflowTask struct {
 	OriginWorkflowArgs  *WorkflowV4        `bson:"origin_workflow_args"      json:"origin_workflow_args"`
 	KeyVals             []*KeyVal          `bson:"key_vals"                  json:"key_vals"`
 	GlobalContext       map[string]string  `bson:"global_context"            json:"global_context"`
+	ClusterIDMap        map[string]bool    `bson:"cluster_id_map"            json:"cluster_id_map"`
 	Status              config.Status      `bson:"status"                    json:"status,omitempty"`
 	TaskCreator         string             `bson:"task_creator"              json:"task_creator,omitempty"`
+	TaskCreatorPhone    string             `bson:"task_creator_phone"        json:"task_creator_phone"`
+	TaskCreatorEmail    string             `bson:"task_creator_email"        json:"task_creator_email"`
 	TaskRevoker         string             `bson:"task_revoker,omitempty"    json:"task_revoker,omitempty"`
 	CreateTime          int64              `bson:"create_time"               json:"create_time,omitempty"`
 	StartTime           int64              `bson:"start_time"                json:"start_time,omitempty"`
@@ -47,6 +51,7 @@ type WorkflowTask struct {
 	Error               string             `bson:"error,omitempty"           json:"error,omitempty"`
 	IsRestart           bool               `bson:"is_restart"                json:"is_restart"`
 	MultiRun            bool               `bson:"multi_run"                 json:"multi_run"`
+	ShareStorages       []*ShareStorage    `bson:"share_storages"            json:"share_storages"`
 }
 
 func (WorkflowTask) TableName() string {
@@ -65,7 +70,9 @@ type StageTask struct {
 }
 
 type JobTask struct {
-	Name       string        `bson:"name"                json:"name"`
+	Name string `bson:"name"                json:"name"`
+	// jobTask unique id, unique in the workflow
+	Key        string        `bson:"key"                 json:"key"`
 	K8sJobName string        `bson:"k8s_job_name"        json:"k8s_job_name"`
 	JobType    string        `bson:"type"                json:"type"`
 	Status     config.Status `bson:"status"              json:"status"`
@@ -91,15 +98,16 @@ type JobTaskCustomDeploySpec struct {
 }
 
 type JobTaskDeploySpec struct {
-	Env                string     `bson:"env"                              json:"env"                                 yaml:"env"`
-	ServiceName        string     `bson:"service_name"                     json:"service_name"                        yaml:"service_name"`
-	ServiceType        string     `bson:"service_type"                     json:"service_type"                        yaml:"service_type"`
-	ServiceModule      string     `bson:"service_module"                   json:"service_module"                      yaml:"service_module"`
-	SkipCheckRunStatus bool       `bson:"skip_check_run_status"            json:"skip_check_run_status"               yaml:"skip_check_run_status"`
-	Image              string     `bson:"image"                            json:"image"                               yaml:"image"`
-	ClusterID          string     `bson:"cluster_id"                       json:"cluster_id"                          yaml:"cluster_id"`
-	Timeout            int        `bson:"timeout"                          json:"timeout"                             yaml:"timeout"`
-	ReplaceResources   []Resource `bson:"replace_resources"                json:"replace_resources"                   yaml:"replace_resources"`
+	Env                string              `bson:"env"                              json:"env"                                 yaml:"env"`
+	ServiceName        string              `bson:"service_name"                     json:"service_name"                        yaml:"service_name"`
+	ServiceType        string              `bson:"service_type"                     json:"service_type"                        yaml:"service_type"`
+	ServiceModule      string              `bson:"service_module"                   json:"service_module"                      yaml:"service_module"`
+	SkipCheckRunStatus bool                `bson:"skip_check_run_status"            json:"skip_check_run_status"               yaml:"skip_check_run_status"`
+	Image              string              `bson:"image"                            json:"image"                               yaml:"image"`
+	ClusterID          string              `bson:"cluster_id"                       json:"cluster_id"                          yaml:"cluster_id"`
+	Timeout            int                 `bson:"timeout"                          json:"timeout"                             yaml:"timeout"`
+	ReplaceResources   []Resource          `bson:"replace_resources"                json:"replace_resources"                   yaml:"replace_resources"`
+	RelatedPodLabels   []map[string]string `bson:"-"                                json:"-"                                   yaml:"-"`
 }
 
 type Resource struct {
@@ -219,6 +227,39 @@ type JobTaskGrayReleaseSpec struct {
 	Events        *Events `bson:"events"                json:"events"               yaml:"events"`
 }
 
+type JobIstioReleaseSpec struct {
+	FirstJob          bool            `bson:"first_job"          json:"first_job"          yaml:"first_job"`
+	Timeout           int64           `bson:"timeout"            json:"timeout"            yaml:"timeout"`
+	ClusterID         string          `bson:"cluster_id"         json:"cluster_id"         yaml:"cluster_id"`
+	ClusterName       string          `bson:"cluster_name"       json:"cluster_name"       yaml:"cluster_name"`
+	Namespace         string          `bson:"namespace"          json:"namespace"          yaml:"namespace"`
+	Weight            int64           `bson:"weight"             json:"weight"             yaml:"weight"`
+	ReplicaPercentage int64           `bson:"replica_percentage" json:"replica_percentage" yaml:"replica_percentage"`
+	Replicas          int64           `bson:"replicas"           json:"replicas"           yaml:"replicas"`
+	Targets           *IstioJobTarget `bson:"targets"            json:"targets"            yaml:"targets"`
+	Event             []*Event        `bson:"event"              json:"event"              yaml:"event"`
+}
+
+type JobIstioRollbackSpec struct {
+	Namespace   string          `json:"namespace"    bson:"namespace"    yaml:"namespace"`
+	ClusterID   string          `json:"cluster_id"   bson:"cluster_id"   yaml:"cluster_id"`
+	ClusterName string          `json:"cluster_name" bson:"cluster_name" yaml:"cluster_name"`
+	Image       string          `json:"image"        bson:"image"        yaml:"image"`
+	Replicas    int             `json:"replicas"     bson:"replicas"     yaml:"replicas"`
+	Targets     *IstioJobTarget `json:"targets"      bson:"targets"      yaml:"targets"`
+	Timeout     int64           `json:"timeout"      bson:"timeout"      yaml:"timeout"`
+}
+
+type MeegoTransitionSpec struct {
+	Link            string                     `bson:"link"               json:"link"               yaml:"link"`
+	Source          string                     `bson:"source"             json:"source"             yaml:"source"`
+	ProjectKey      string                     `bson:"project_key"        json:"project_key"        yaml:"project_key"`
+	ProjectName     string                     `bson:"project_name"       json:"project_name"       yaml:"project_name"`
+	WorkItemType    string                     `bson:"work_item_type"     json:"work_item_type"     yaml:"work_item_type"`
+	WorkItemTypeKey string                     `bson:"work_item_type_key" json:"work_item_type_key" yaml:"work_item_type_key"`
+	WorkItems       []*MeegoWorkItemTransition `bson:"work_items"         json:"work_items"         yaml:"work_items"`
+}
+
 type JobTaskGrayRollbackSpec struct {
 	ClusterID        string `bson:"cluster_id"             json:"cluster_id"             yaml:"cluster_id"`
 	ClusterName      string `bson:"cluster_name"           json:"cluster_name"           yaml:"cluster_name"`
@@ -238,6 +279,50 @@ type JobTasK8sPatchSpec struct {
 	ClusterID  string           `bson:"cluster_id"             json:"cluster_id"             yaml:"cluster_id"`
 	Namespace  string           `bson:"namespace"              json:"namespace"              yaml:"namespace"`
 	PatchItems []*PatchTaskItem `bson:"patch_items"            json:"patch_items"           yaml:"patch_items"`
+}
+
+type IssueID struct {
+	Key    string `bson:"key" json:"key" yaml:"key"`
+	Name   string `bson:"name" json:"name" yaml:"name"`
+	Status string `bson:"status" json:"status" yaml:"status"`
+	Link   string `bson:"link" json:"link" yaml:"link"`
+}
+
+type JobTaskJiraSpec struct {
+	ProjectID    string     `bson:"project_id"  json:"project_id"  yaml:"project_id"`
+	IssueType    string     `bson:"issue_type"  json:"issue_type"  yaml:"issue_type"`
+	Issues       []*IssueID `bson:"issues" json:"issues" yaml:"issues"`
+	TargetStatus string     `bson:"target_status" json:"target_status" yaml:"target_status"`
+}
+
+type JobTaskNacosSpec struct {
+	NacosID       string       `bson:"nacos_id"         json:"nacos_id"         yaml:"nacos_id"`
+	NamespaceID   string       `bson:"namespace_id"     json:"namespace_id"     yaml:"namespace_id"`
+	NamespaceName string       `bson:"namespace_name"   json:"namespace_name"   yaml:"namespace_name"`
+	NacosAddr     string       `bson:"nacos_addr"       json:"nacos_addr"       yaml:"nacos_addr"`
+	UserName      string       `bson:"user_name"        json:"user_name"        yaml:"user_name"`
+	Password      string       `bson:"password"         json:"password"         yaml:"password"`
+	NacosDatas    []*NacosData `bson:"nacos_datas"      json:"nacos_datas"      yaml:"nacos_datas"`
+}
+
+type NacosData struct {
+	types.NacosConfig `bson:",inline" json:",inline" yaml:",inline"`
+	Error             string `bson:"error"      json:"error"      yaml:"error"`
+}
+
+type JobTaskApolloSpec struct {
+	ApolloID      string                    `bson:"apolloID" json:"apolloID" yaml:"apolloID"`
+	NamespaceList []*JobTaskApolloNamespace `bson:"namespaceList" json:"namespaceList" yaml:"namespaceList"`
+}
+
+type JobTaskApolloNamespace struct {
+	ApolloNamespace `bson:",inline" json:",inline" yaml:",inline"`
+	Error           string `bson:"error" json:"error" yaml:"error"`
+}
+
+type ApolloKV struct {
+	Key string `bson:"key" json:"key" yaml:"key"`
+	Val string `bson:"val" json:"val" yaml:"val"`
 }
 
 type PatchTaskItem struct {
@@ -289,16 +374,21 @@ type StepTask struct {
 }
 
 type WorkflowTaskCtx struct {
-	WorkflowName      string
-	ProjectName       string
-	TaskID            int64
-	DockerHost        string
-	Workspace         string
-	DistDir           string
-	DockerMountDir    string
-	ConfigMapMountDir string
-	WorkflowKeyVals   []*KeyVal
-	GlobalContextGet  func(key string) (string, bool)
-	GlobalContextSet  func(key, value string)
-	GlobalContextEach func(f func(k, v string) bool)
+	WorkflowName              string
+	WorkflowDisplayName       string
+	ProjectName               string
+	TaskID                    int64
+	DockerHost                string
+	Workspace                 string
+	DistDir                   string
+	DockerMountDir            string
+	ConfigMapMountDir         string
+	WorkflowTaskCreatorEmail  string
+	WorkflowTaskCreatorMobile string
+	WorkflowKeyVals           []*KeyVal
+	GlobalContextGet          func(key string) (string, bool)
+	GlobalContextSet          func(key, value string)
+	GlobalContextEach         func(f func(k, v string) bool)
+	ClusterIDAdd              func(clusterID string)
+	SetStatus                 func(status config.Status)
 }

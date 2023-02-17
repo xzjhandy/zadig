@@ -22,8 +22,6 @@ import (
 	"github.com/koderover/zadig/pkg/setting"
 )
 
-// Vars不做保存，只做input参数
-// product_name 当前项目主键
 type Product struct {
 	ProjectName         string                `bson:"project_name"              json:"project_name"`
 	ProductName         string                `bson:"product_name"              json:"product_name"`
@@ -36,10 +34,11 @@ type Product struct {
 	AutoDeploy          *AutoDeployPolicy     `bson:"auto_deploy"               json:"auto_deploy"`
 	Timeout             int                   `bson:"timeout,omitempty"         json:"timeout,omitempty"`
 	Services            [][]string            `bson:"services"                  json:"services"`
+	ProductionServices  [][]string            `bson:"production_services"       json:"production_services"`
 	SharedServices      []*ServiceInfo        `bson:"shared_services,omitempty" json:"shared_services,omitempty"`
-	Vars                []*RenderKV           `bson:"vars"                      json:"vars"`
+	Vars                []*RenderKV           `bson:"-"                         json:"vars"`
 	EnvVars             []*EnvRenderKV        `bson:"-"                         json:"env_vars,omitempty"`
-	ChartInfos          []*RenderChart        `bson:"-"                         json:"chart_infos,omitempty"`
+	ChartInfos          []*ServiceRender      `bson:"-"                         json:"chart_infos,omitempty"`
 	Description         string                `bson:"description,omitempty"     json:"desc,omitempty"`
 	ProductFeature      *ProductFeature       `bson:"product_feature,omitempty" json:"product_feature,omitempty"`
 	ImageSearchingRules []*ImageSearchingRule `bson:"image_searching_rules,omitempty" json:"image_searching_rules,omitempty"`
@@ -120,35 +119,35 @@ type CustomYaml struct {
 	SourceID     string      `bson:"source_id" json:"source_id"`
 }
 
-// RenderChart ...
-type RenderChart struct {
-	ServiceName    string      `bson:"service_name,omitempty"    json:"service_name,omitempty"`
-	ChartVersion   string      `bson:"chart_version,omitempty"   json:"chart_version,omitempty"`
-	ValuesYaml     string      `bson:"values_yaml,omitempty"     json:"values_yaml,omitempty"`
-	OverrideYaml   *CustomYaml `bson:"override_yaml,omitempty"   json:"override_yaml,omitempty"`
-	OverrideValues string      `bson:"override_values,omitempty"   json:"override_values,omitempty"`
+// ServiceRender used for helm product service ...
+type ServiceRender struct {
+	ServiceName string `bson:"service_name,omitempty"    json:"service_name,omitempty"`
+
+	// ---- for helm services begin ----
+	ChartVersion   string `bson:"chart_version,omitempty"   json:"chart_version,omitempty"`
+	ValuesYaml     string `bson:"values_yaml,omitempty"     json:"values_yaml,omitempty"`
+	OverrideValues string `bson:"override_values,omitempty"   json:"override_values,omitempty"` // used for helm services, json-encoded string of kv value
+	// ---- for helm services end ----
+
+	// OverrideYaml will be used in both helm and k8s projects
+	// In k8s this is variable_yaml
+	OverrideYaml *CustomYaml `bson:"override_yaml,omitempty"   json:"override_yaml,omitempty"`
 }
 
 type ProductFeature struct {
-	// 方案，CI/CD 或者 k8s 或者 not_k8s
-	KodeScheme string `bson:"kode_scheme"                  json:"kode_scheme"`
 	// 基础设施，kubernetes 或者 cloud_host
 	BasicFacility string `bson:"basic_facility"            json:"basic_facility"`
 	// 部署方式，basic_facility=kubernetes时填写，k8s 或者 helm
 	DeployType string `bson:"deploy_type"                  json:"deploy_type"`
-	// 技术架构，micro_service 或者 monomer_application
-	TechArch string `bson:"tech_arch"                      json:"tech_arch"`
-	// 开发习惯，interface_mode 或者 yaml
-	DevelopHabit string `bson:"develop_habit"              json:"develop_habit"`
 	// 创建环境方式,system/external(系统创建/外部环境)
 	CreateEnvType string `bson:"create_env_type"           json:"create_env_type"`
 }
 
 type ForkProject struct {
-	EnvName      string         `json:"env_name"`
-	WorkflowName string         `json:"workflow_name"`
-	ValuesYamls  []*RenderChart `json:"values_yamls"`
-	ProductName  string         `json:"product_name"`
+	EnvName      string           `json:"env_name"`
+	WorkflowName string           `json:"workflow_name"`
+	ValuesYamls  []*ServiceRender `json:"values_yamls"`
+	ProductName  string           `json:"product_name"`
 }
 
 type ImageSearchingRule struct {
@@ -224,6 +223,25 @@ func (p *Product) AllServiceInfoMap() map[string]*ServiceInfo {
 	return res
 }
 
+func (p *Product) IsHelmProduct() bool {
+	return p.ProductFeature != nil && p.ProductFeature.DeployType == setting.HelmDeployType && p.ProductFeature.BasicFacility == setting.BasicFacilityK8S
+}
+
+func (p *Product) IsK8sYamlProduct() bool {
+	if p.ProductFeature == nil {
+		return true
+	}
+	return p.ProductFeature != nil && p.ProductFeature.DeployType == setting.K8SDeployType && p.ProductFeature.BasicFacility == setting.BasicFacilityK8S && p.ProductFeature.CreateEnvType != setting.SourceFromExternal
+}
+
+func (p *Product) IsCVMProduct() bool {
+	return p.ProductFeature != nil && p.ProductFeature.BasicFacility == setting.BasicFacilityCVM
+}
+
+func (p *Product) IsHostProduct() bool {
+	return p.ProductFeature != nil && p.ProductFeature.BasicFacility == setting.BasicFacilityK8S && p.ProductFeature.CreateEnvType == setting.SourceFromExternal
+}
+
 func (r *RenderKV) SetAlias() {
 	r.Alias = "{{." + r.Key + "}}"
 }
@@ -251,7 +269,7 @@ func (r *RenderKV) RemoveDupServices() {
 	r.Services = result
 }
 
-func (rc *RenderChart) GetOverrideYaml() string {
+func (rc *ServiceRender) GetOverrideYaml() string {
 	if rc.OverrideYaml == nil {
 		return ""
 	}

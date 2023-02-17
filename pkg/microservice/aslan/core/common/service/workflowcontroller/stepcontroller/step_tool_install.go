@@ -22,11 +22,10 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v2"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/types/step"
 )
@@ -45,7 +44,7 @@ func NewToolInstallCtl(stepTask *commonmodels.StepTask, jobPath *string, log *za
 	}
 	toolInstallSpec := &step.StepToolInstallSpec{}
 	if err := yaml.Unmarshal(yamlString, &toolInstallSpec); err != nil {
-		return nil, fmt.Errorf("unmarshal tool spec error: %v", err)
+		return nil, fmt.Errorf("unmarshal tool install spec error: %v", err)
 	}
 	stepTask.Spec = toolInstallSpec
 	return &toolInstallCtl{toolInstalldSpec: toolInstallSpec, jobPath: jobPath, log: log, step: stepTask}, nil
@@ -62,7 +61,7 @@ func (s *toolInstallCtl) PreRun(ctx context.Context) error {
 			Protocol:  config.S3StorageProtocol(),
 		},
 	}
-	objectStorage, _ := mongodb.NewS3StorageColl().FindDefault()
+	objectStorage, _ := commonrepo.NewS3StorageColl().FindDefault()
 	if objectStorage != nil {
 		spec.S3Storage.Endpoint = objectStorage.Endpoint
 		spec.S3Storage.Sk = objectStorage.Sk
@@ -74,6 +73,7 @@ func (s *toolInstallCtl) PreRun(ctx context.Context) error {
 		if objectStorage.Insecure {
 			spec.S3Storage.Protocol = "http"
 		}
+		spec.S3Storage.Region = objectStorage.Region
 	}
 
 	for _, tool := range s.toolInstalldSpec.Installs {
@@ -104,7 +104,7 @@ func (s *toolInstallCtl) AfterRun(ctx context.Context) error {
 	return nil
 }
 
-//根据用户的配置和BuildStep中步骤的依赖，从系统配置的InstallItems中获取配置项，构建Install Context
+// 根据用户的配置和BuildStep中步骤的依赖，从系统配置的InstallItems中获取配置项，构建Install Context
 func buildInstallCtx(name, version string) (*commonmodels.Install, error) {
 	resp := &commonmodels.Install{}
 	if name == "" || version == "" {

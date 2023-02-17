@@ -18,10 +18,13 @@ package workflow
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
+
+	"github.com/pkg/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
@@ -42,11 +45,6 @@ import (
 	"github.com/koderover/zadig/pkg/setting"
 	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/log"
-)
-
-const (
-	JobNameRegx  = "^[a-z][a-z0-9-]{0,31}$"
-	WorkflowRegx = "^[a-z0-9-]+$"
 )
 
 func CreateWorkflowV4(user string, workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger) error {
@@ -106,6 +104,9 @@ func UpdateWorkflowV4(name, user string, inputWorkflow *commonmodels.WorkflowV4,
 	inputWorkflow.UpdateTime = time.Now().Unix()
 	inputWorkflow.ID = workflow.ID
 	inputWorkflow.HookCtls = workflow.HookCtls
+	inputWorkflow.JiraHookCtls = workflow.JiraHookCtls
+	inputWorkflow.GeneralHookCtls = workflow.GeneralHookCtls
+	inputWorkflow.MeegoHookCtls = workflow.MeegoHookCtls
 
 	for _, stage := range inputWorkflow.Stages {
 		for _, job := range stage.Jobs {
@@ -134,6 +135,15 @@ func FindWorkflowV4(encryptedKey, name string, logger *zap.SugaredLogger) (*comm
 	}
 	if err := ensureWorkflowV4Resp(encryptedKey, workflow, logger); err != nil {
 		return workflow, err
+	}
+	return workflow, err
+}
+
+func FindWorkflowV4Raw(name string, logger *zap.SugaredLogger) (*commonmodels.WorkflowV4, error) {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(name)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", name, err)
+		return workflow, e.ErrFindWorkflow.AddErr(err)
 	}
 	return workflow, err
 }
@@ -218,13 +228,21 @@ func ListWorkflowV4(projectName, viewName, userID string, names, v4Names []strin
 	if err != nil {
 		return resp, err
 	}
+	favorites, err := commonrepo.NewFavoriteColl().List(&commonrepo.FavoriteArgs{UserID: userID, Type: string(config.WorkflowTypeV4)})
+	if err != nil {
+		return resp, errors.Errorf("failed to get custom workflow favorite data, err: %v", err)
+	}
+	favoriteSet := sets.NewString()
+	for _, f := range favorites {
+		favoriteSet.Insert(f.Name)
+	}
 	workflowStatMap := getWorkflowStatMap(workflowList, config.WorkflowTypeV4)
 
 	for _, workflowModel := range workflowV4List {
 		stages := []string{}
 		for _, stage := range workflowModel.Stages {
 			if stage.Approval != nil && stage.Approval.Enabled {
-				stages = append(stages, "人工审核")
+				stages = append(stages, "人工审批")
 			}
 			stages = append(stages, stage.Name)
 		}
@@ -246,6 +264,12 @@ func ListWorkflowV4(projectName, viewName, userID string, names, v4Names []strin
 			Description:   workflowModel.Description,
 			BaseRefs:      baseRefs,
 			BaseName:      workflowModel.BaseName,
+		}
+		if workflowModel.Category == setting.ReleaseWorkflow {
+			workflow.WorkflowType = string(setting.ReleaseWorkflow)
+		}
+		if favoriteSet.Has(workflow.Name) {
+			workflow.IsFavorite = true
 		}
 		getRecentTaskV4Info(workflow, tasks)
 		setWorkflowStat(workflow, workflowStatMap)
@@ -299,10 +323,12 @@ func getRecentTaskV4Info(workflow *Workflow, tasks []*commonmodels.WorkflowTask)
 	recentTask := &commonmodels.WorkflowTask{}
 	recentFailedTask := &commonmodels.WorkflowTask{}
 	recentSucceedTask := &commonmodels.WorkflowTask{}
+	workflow.NeverRun = true
 	for _, task := range tasks {
 		if task.WorkflowName != workflow.Name {
 			continue
 		}
+		workflow.NeverRun = false
 		if task.TaskID > recentTask.TaskID {
 			recentTask = task
 		}
@@ -421,7 +447,7 @@ func LintWorkflowV4(workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger
 		logger.Errorf(err.Error())
 		return e.ErrUpsertWorkflow.AddErr(err)
 	}
-	match, err := regexp.MatchString(WorkflowRegx, workflow.Name)
+	match, err := regexp.MatchString(setting.WorkflowRegx, workflow.Name)
 	if err != nil {
 		logger.Errorf("reg compile failed: %v", err)
 		return e.ErrUpsertWorkflow.AddErr(err)
@@ -451,12 +477,16 @@ func LintWorkflowV4(workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger
 	stageNameMap := make(map[string]bool)
 	jobNameMap := make(map[string]string)
 
-	reg, err := regexp.Compile(JobNameRegx)
+	reg, err := regexp.Compile(setting.JobNameRegx)
 	if err != nil {
 		logger.Errorf("reg compile failed: %v", err)
 		return e.ErrUpsertWorkflow.AddErr(err)
 	}
 	for _, stage := range workflow.Stages {
+		if err := lintApprovals(stage.Approval); err != nil {
+			logger.Errorf("stage: %s approval info error: %v", stage.Name, err)
+			return e.ErrUpsertWorkflow.AddDesc(fmt.Sprintf("stage: %s approval info error: %v", stage.Name, err))
+		}
 		if _, ok := stageNameMap[stage.Name]; !ok {
 			stageNameMap[stage.Name] = true
 		} else {
@@ -465,8 +495,8 @@ func LintWorkflowV4(workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger
 		}
 		for _, job := range stage.Jobs {
 			if match := reg.MatchString(job.Name); !match {
-				logger.Errorf("job name [%s] did not match %s", job.Name, JobNameRegx)
-				return e.ErrUpsertWorkflow.AddDesc(fmt.Sprintf("job name [%s] did not match %s", job.Name, JobNameRegx))
+				logger.Errorf("job name [%s] did not match %s", job.Name, setting.JobNameRegx)
+				return e.ErrUpsertWorkflow.AddDesc(fmt.Sprintf("job name [%s] did not match %s", job.Name, setting.JobNameRegx))
 			}
 			if _, ok := jobNameMap[job.Name]; !ok {
 				jobNameMap[job.Name] = string(job.JobType)
@@ -480,6 +510,35 @@ func LintWorkflowV4(workflow *commonmodels.WorkflowV4, logger *zap.SugaredLogger
 			}
 		}
 	}
+	return nil
+}
+
+func lintApprovals(approval *commonmodels.Approval) error {
+	if approval == nil {
+		return nil
+	}
+	if !approval.Enabled {
+		return nil
+	}
+	switch approval.Type {
+	case config.NativeApproval:
+		if approval.NativeApproval == nil {
+			return errors.New("approval not found")
+		}
+		if len(approval.NativeApproval.ApproveUsers) < approval.NativeApproval.NeededApprovers {
+			return errors.New("all approve users should not less than needed approvers")
+		}
+	case config.LarkApproval:
+		if approval.LarkApproval == nil {
+			return errors.New("approval not found")
+		}
+		if len(approval.LarkApproval.ApproveUsers) == 0 {
+			return errors.New("num of approver is 0")
+		}
+	default:
+		return errors.New("invalid approval type")
+	}
+
 	return nil
 }
 
@@ -602,6 +661,9 @@ func GetWebhookForWorkflowV4Preset(workflowName, triggerName string, logger *zap
 	}
 	workflowHook.Repos = repos
 	workflowHook.WorkflowArg = workflow
+	workflowHook.WorkflowArg.JiraHookCtls = nil
+	workflowHook.WorkflowArg.MeegoHookCtls = nil
+	workflowHook.WorkflowArg.GeneralHookCtls = nil
 	workflowHook.WorkflowArg.HookCtls = nil
 	return workflowHook, nil
 }
@@ -640,6 +702,379 @@ func DeleteWebhookForWorkflowV4(workflowName, triggerName string, logger *zap.Su
 	}
 	if err := deleteGerritWebhook(existHook.MainRepo, workflowName); err != nil {
 		logger.Errorf("delete gerrit webhook failed: %v", err)
+	}
+	return nil
+}
+
+func CreateGeneralHookForWorkflowV4(workflowName string, arg *models.GeneralHook, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrCreateGeneralHook.AddErr(err)
+	}
+	for _, hook := range workflow.GeneralHookCtls {
+		if hook.Name == arg.Name {
+			errMsg := fmt.Sprintf("general hook %s already exists", arg.Name)
+			logger.Error(errMsg)
+			return e.ErrCreateGeneralHook.AddDesc(errMsg)
+		}
+	}
+	if err := validateHookNames([]string{arg.Name}); err != nil {
+		logger.Errorf(err.Error())
+		return e.ErrCreateGeneralHook.AddErr(err)
+	}
+	workflow.GeneralHookCtls = append(workflow.GeneralHookCtls, arg)
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to create general hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrCreateGeneralHook.AddDesc(errMsg)
+	}
+	return nil
+}
+
+func GetGeneralHookForWorkflowV4Preset(workflowName, hookName string, logger *zap.SugaredLogger) (*commonmodels.GeneralHook, error) {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return nil, e.ErrGetGeneralHook.AddErr(err)
+	}
+	gHook := &commonmodels.GeneralHook{}
+	for _, hook := range workflow.GeneralHookCtls {
+		if hook.Name == hookName {
+			gHook = hook
+		}
+	}
+	if err := job.MergeArgs(workflow, gHook.WorkflowArg); err != nil {
+		errMsg := fmt.Sprintf("merge workflow args error: %v", err)
+		log.Error(errMsg)
+		return nil, e.ErrGetGeneralHook.AddDesc(errMsg)
+	}
+	gHook.WorkflowArg = workflow
+	gHook.WorkflowArg.JiraHookCtls = nil
+	gHook.WorkflowArg.MeegoHookCtls = nil
+	gHook.WorkflowArg.GeneralHookCtls = nil
+	gHook.WorkflowArg.HookCtls = nil
+	return gHook, nil
+}
+
+func ListGeneralHookForWorkflowV4(workflowName string, logger *zap.SugaredLogger) ([]*models.GeneralHook, error) {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return nil, e.ErrListGeneralHook.AddErr(err)
+	}
+	return workflow.GeneralHookCtls, nil
+}
+
+func UpdateGeneralHookForWorkflowV4(workflowName string, arg *models.GeneralHook, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrUpdateGeneralHook.AddErr(err)
+	}
+	updated := false
+	for i, hook := range workflow.GeneralHookCtls {
+		if hook.Name == arg.Name {
+			workflow.GeneralHookCtls[i] = arg
+			updated = true
+		}
+	}
+	if !updated {
+		errMsg := fmt.Sprintf("failed to find general hook %s", arg.Name)
+		log.Error(errMsg)
+		return e.ErrUpdateGeneralHook.AddDesc(errMsg)
+	}
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to update general hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrUpdateGeneralHook.AddDesc(errMsg)
+	}
+	return nil
+}
+
+func DeleteGeneralHookForWorkflowV4(workflowName, hookName string, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrDeleteGeneralHook.AddErr(err)
+	}
+	var list []*models.GeneralHook
+	for _, ctl := range workflow.GeneralHookCtls {
+		if ctl.Name == hookName {
+			continue
+		}
+		list = append(list, ctl)
+	}
+	if len(list) == len(workflow.GeneralHookCtls) {
+		errMsg := fmt.Sprintf("general hook %s not found", hookName)
+		log.Error(errMsg)
+		return e.ErrDeleteGeneralHook.AddDesc(errMsg)
+	}
+	workflow.GeneralHookCtls = list
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to delete general hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrDeleteGeneralHook.AddDesc(errMsg)
+	}
+	return nil
+}
+
+func GeneralHookEventHandler(workflowName, hookName string, logger *zap.SugaredLogger) error {
+	workflowInfo, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		logger.Error(errMsg)
+		return errors.New(errMsg)
+	}
+	var generalHook *models.GeneralHook
+	for _, hook := range workflowInfo.GeneralHookCtls {
+		if hook.Name == hookName {
+			generalHook = hook
+			break
+		}
+	}
+	if generalHook == nil {
+		errMsg := fmt.Sprintf("Failed to find general hook %s", hookName)
+		logger.Error(errMsg)
+		return errors.New(errMsg)
+	}
+	if !generalHook.Enabled {
+		errMsg := fmt.Sprintf("Not enabled general hook %s", hookName)
+		logger.Error(errMsg)
+		return errors.New(errMsg)
+	}
+	_, err = CreateWorkflowTaskV4ByBuildInTrigger(setting.JiraHookTaskCreator, generalHook.WorkflowArg, logger)
+	if err != nil {
+		errMsg := fmt.Sprintf("HandleGeneralHookEvent: failed to create workflow task: %s", err)
+		logger.Error(errMsg)
+		return errors.New(errMsg)
+	}
+	logger.Infof("HandleGeneralHookEvent: workflow-%s hook-%s create workflow task success", workflowName, hookName)
+	return nil
+}
+
+func CreateJiraHookForWorkflowV4(workflowName string, arg *models.JiraHook, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrCreateJiraHook.AddErr(err)
+	}
+	for _, hook := range workflow.JiraHookCtls {
+		if hook.Name == arg.Name {
+			errMsg := fmt.Sprintf("jira hook %s already exists", arg.Name)
+			logger.Error(errMsg)
+			return e.ErrCreateJiraHook.AddDesc(errMsg)
+		}
+	}
+	if err := validateHookNames([]string{arg.Name}); err != nil {
+		logger.Errorf(err.Error())
+		return e.ErrCreateJiraHook.AddErr(err)
+	}
+	workflow.JiraHookCtls = append(workflow.JiraHookCtls, arg)
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to create jira hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrCreateJiraHook.AddDesc(errMsg)
+	}
+	return nil
+}
+
+func GetJiraHookForWorkflowV4Preset(workflowName, hookName string, logger *zap.SugaredLogger) (*commonmodels.JiraHook, error) {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return nil, e.ErrGetJiraHook.AddErr(err)
+	}
+	jiraHook := &commonmodels.JiraHook{}
+	for _, hook := range workflow.JiraHookCtls {
+		if hook.Name == hookName {
+			jiraHook = hook
+		}
+	}
+	if err := job.MergeArgs(workflow, jiraHook.WorkflowArg); err != nil {
+		errMsg := fmt.Sprintf("merge workflow args error: %v", err)
+		log.Error(errMsg)
+		return nil, e.ErrGetJiraHook.AddDesc(errMsg)
+	}
+	jiraHook.WorkflowArg = workflow
+	jiraHook.WorkflowArg.JiraHookCtls = nil
+	jiraHook.WorkflowArg.MeegoHookCtls = nil
+	jiraHook.WorkflowArg.GeneralHookCtls = nil
+	jiraHook.WorkflowArg.HookCtls = nil
+	return jiraHook, nil
+}
+
+func ListJiraHookForWorkflowV4(workflowName string, logger *zap.SugaredLogger) ([]*models.JiraHook, error) {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return nil, e.ErrListJiraHook.AddErr(err)
+	}
+	return workflow.JiraHookCtls, nil
+}
+
+func UpdateJiraHookForWorkflowV4(workflowName string, arg *models.JiraHook, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrUpdateJiraHook.AddErr(err)
+	}
+	updated := false
+	for i, hook := range workflow.JiraHookCtls {
+		if hook.Name == arg.Name {
+			workflow.JiraHookCtls[i] = arg
+			updated = true
+		}
+	}
+	if !updated {
+		errMsg := fmt.Sprintf("failed to find jira hook %s", arg.Name)
+		log.Error(errMsg)
+		return e.ErrUpdateJiraHook.AddDesc(errMsg)
+	}
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to update jira hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrUpdateJiraHook.AddDesc(errMsg)
+	}
+	return nil
+}
+
+func DeleteJiraHookForWorkflowV4(workflowName, hookName string, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrDeleteJiraHook.AddErr(err)
+	}
+	var list []*models.JiraHook
+	for _, ctl := range workflow.JiraHookCtls {
+		if ctl.Name == hookName {
+			continue
+		}
+		list = append(list, ctl)
+	}
+	if len(list) == len(workflow.JiraHookCtls) {
+		errMsg := fmt.Sprintf("jira hook %s not found", hookName)
+		log.Error(errMsg)
+		return e.ErrDeleteJiraHook.AddDesc(errMsg)
+	}
+	workflow.JiraHookCtls = list
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to delete jira hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrDeleteJiraHook.AddDesc(errMsg)
+	}
+	return nil
+}
+
+func CreateMeegoHookForWorkflowV4(workflowName string, arg *models.MeegoHook, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrCreateMeegoHook.AddErr(err)
+	}
+	for _, hook := range workflow.MeegoHookCtls {
+		if hook.Name == arg.Name {
+			errMsg := fmt.Sprintf("meego hook %s already exists", arg.Name)
+			logger.Error(errMsg)
+			return e.ErrCreateMeegoHook.AddDesc(errMsg)
+		}
+	}
+	if err := validateHookNames([]string{arg.Name}); err != nil {
+		logger.Errorf(err.Error())
+		return e.ErrCreateMeegoHook.AddErr(err)
+	}
+	workflow.MeegoHookCtls = append(workflow.MeegoHookCtls, arg)
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to create jira hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrCreateMeegoHook.AddDesc(errMsg)
+	}
+	return nil
+}
+
+func GetMeegoHookForWorkflowV4Preset(workflowName, hookName string, logger *zap.SugaredLogger) (*commonmodels.MeegoHook, error) {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return nil, e.ErrGetMeegoHook.AddErr(err)
+	}
+	meegoHook := &commonmodels.MeegoHook{}
+	for _, hook := range workflow.MeegoHookCtls {
+		if hook.Name == hookName {
+			meegoHook = hook
+		}
+	}
+	if err := job.MergeArgs(workflow, meegoHook.WorkflowArg); err != nil {
+		errMsg := fmt.Sprintf("merge workflow args error: %v", err)
+		log.Error(errMsg)
+		return nil, e.ErrGetMeegoHook.AddDesc(errMsg)
+	}
+	meegoHook.WorkflowArg = workflow
+	meegoHook.WorkflowArg.JiraHookCtls = nil
+	meegoHook.WorkflowArg.MeegoHookCtls = nil
+	meegoHook.WorkflowArg.GeneralHookCtls = nil
+	meegoHook.WorkflowArg.HookCtls = nil
+	return meegoHook, nil
+}
+
+func ListMeegoHookForWorkflowV4(workflowName string, logger *zap.SugaredLogger) ([]*models.MeegoHook, error) {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return nil, e.ErrListMeegoHook.AddErr(err)
+	}
+	return workflow.MeegoHookCtls, nil
+}
+
+func UpdateMeegoHookForWorkflowV4(workflowName string, arg *models.MeegoHook, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrUpdateMeegoHook.AddErr(err)
+	}
+	updated := false
+	for i, hook := range workflow.MeegoHookCtls {
+		if hook.Name == arg.Name {
+			workflow.MeegoHookCtls[i] = arg
+			updated = true
+		}
+	}
+	if !updated {
+		errMsg := fmt.Sprintf("failed to find jira hook %s", arg.Name)
+		log.Error(errMsg)
+		return e.ErrUpdateMeegoHook.AddDesc(errMsg)
+	}
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to update jira hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrUpdateMeegoHook.AddDesc(errMsg)
+	}
+	return nil
+}
+
+func DeleteMeegoHookForWorkflowV4(workflowName, hookName string, logger *zap.SugaredLogger) error {
+	workflow, err := commonrepo.NewWorkflowV4Coll().Find(workflowName)
+	if err != nil {
+		logger.Errorf("Failed to find WorkflowV4: %s, the error is: %v", workflowName, err)
+		return e.ErrDeleteMeegoHook.AddErr(err)
+	}
+	var list []*models.MeegoHook
+	for _, ctl := range workflow.MeegoHookCtls {
+		if ctl.Name == hookName {
+			continue
+		}
+		list = append(list, ctl)
+	}
+	if len(list) == len(workflow.MeegoHookCtls) {
+		errMsg := fmt.Sprintf("meego hook %s not found", hookName)
+		log.Error(errMsg)
+		return e.ErrDeleteMeegoHook.AddDesc(errMsg)
+	}
+	workflow.MeegoHookCtls = list
+	if err := commonrepo.NewWorkflowV4Coll().Update(workflow.ID.Hex(), workflow); err != nil {
+		errMsg := fmt.Sprintf("failed to delete jira hook for workflow %s, the error is: %v", workflowName, err)
+		log.Error(errMsg)
+		return e.ErrDeleteMeegoHook.AddDesc(errMsg)
 	}
 	return nil
 }
@@ -854,4 +1289,134 @@ func GetPatchParams(patchItem *commonmodels.PatchItem, logger *zap.SugaredLogger
 		})
 	}
 	return resp, nil
+}
+
+func GetWorkflowGlabalVars(workflow *commonmodels.WorkflowV4, currentJobName string, log *zap.SugaredLogger) []string {
+	return append(getDefaultVars(workflow), jobctl.GetWorkflowOutputs(workflow, currentJobName, log)...)
+}
+
+func getDefaultVars(workflow *commonmodels.WorkflowV4) []string {
+	vars := []string{}
+	vars = append(vars, fmt.Sprintf(setting.RenderValueTemplate, "project"))
+	vars = append(vars, fmt.Sprintf(setting.RenderValueTemplate, "workflow.name"))
+	vars = append(vars, fmt.Sprintf(setting.RenderValueTemplate, "workflow.task.creator"))
+	vars = append(vars, fmt.Sprintf(setting.RenderValueTemplate, "workflow.task.timestamp"))
+	for _, param := range workflow.Params {
+		vars = append(vars, fmt.Sprintf(setting.RenderValueTemplate, strings.Join([]string{"workflow", "params", param.Name}, ".")))
+	}
+	return vars
+}
+
+func CheckShareStorageEnabled(clusterID, jobType, identifyName, project string, logger *zap.SugaredLogger) (bool, error) {
+	// if cluster id was set, we just check if the cluster has share storage enabled
+	if clusterID != "" {
+		return checkClusterShareStorage(clusterID)
+	}
+	switch jobType {
+	case string(config.JobZadigBuild):
+		build, err := commonrepo.NewBuildColl().Find(&commonrepo.BuildFindOption{Name: identifyName, ProductName: project})
+		if err != nil {
+			return false, fmt.Errorf("find build error: %v", err)
+		}
+		if build.TemplateID == "" {
+			clusterID = build.PreBuild.ClusterID
+			break
+		}
+		template, err := commonrepo.NewBuildTemplateColl().Find(&commonrepo.BuildTemplateQueryOption{ID: build.TemplateID})
+		if err != nil {
+			return false, fmt.Errorf("find build template error: %v", err)
+		}
+		clusterID = template.PreBuild.ClusterID
+	case string(config.JobZadigTesting):
+		testing, err := commonrepo.NewTestingColl().Find(identifyName, "")
+		if err != nil {
+			return false, fmt.Errorf("find testing error: %v", err)
+		}
+		clusterID = testing.PreTest.ClusterID
+	case string(config.JobZadigScanning):
+		scanning, err := commonrepo.NewScanningColl().Find(project, identifyName)
+		if err != nil {
+			return false, fmt.Errorf("find scanning error: %v", err)
+		}
+		clusterID = scanning.AdvancedSetting.ClusterID
+	default:
+		return false, fmt.Errorf("job type %s is not supported", jobType)
+	}
+	if clusterID == "" {
+		clusterID = setting.LocalClusterID
+	}
+	return checkClusterShareStorage(clusterID)
+}
+
+func checkClusterShareStorage(id string) (bool, error) {
+	cluster, err := commonrepo.NewK8SClusterColl().Get(id)
+	if err != nil {
+		return false, fmt.Errorf("find cluter error: %v", err)
+	}
+	if cluster.ShareStorage.NFSProperties.PVC != "" {
+		return true, nil
+	}
+	return false, nil
+}
+
+func ListAllAvailableWorkflows(projects []string, log *zap.SugaredLogger) ([]*Workflow, error) {
+	resp := make([]*Workflow, 0)
+	allProductWorkflows, err := commonrepo.NewWorkflowColl().ListWorkflowsByProjects(projects)
+	if err != nil {
+		log.Errorf("failed to get all product workflows, error: %s", err)
+		return nil, err
+	}
+	for _, productWorkflow := range allProductWorkflows {
+		resp = append(resp, &Workflow{
+			Name:         productWorkflow.Name,
+			DisplayName:  productWorkflow.DisplayName,
+			ProjectName:  productWorkflow.ProductTmplName,
+			UpdateTime:   productWorkflow.UpdateTime,
+			CreateTime:   productWorkflow.CreateTime,
+			UpdateBy:     productWorkflow.UpdateBy,
+			WorkflowType: "",
+			Description:  productWorkflow.Description,
+			BaseName:     productWorkflow.BaseName,
+		})
+	}
+
+	allCustomWorkflows, err := commonrepo.NewWorkflowV4Coll().ListByProjectNames(projects)
+	if err != nil {
+		log.Errorf("failed to get all custom workflows, error: %s", err)
+		return nil, err
+	}
+
+	for _, customWorkflow := range allCustomWorkflows {
+		resp = append(resp, &Workflow{
+			Name:         customWorkflow.Name,
+			DisplayName:  customWorkflow.DisplayName,
+			ProjectName:  customWorkflow.Project,
+			UpdateTime:   customWorkflow.UpdateTime,
+			CreateTime:   customWorkflow.CreateTime,
+			UpdateBy:     customWorkflow.UpdatedBy,
+			WorkflowType: setting.CustomWorkflowType,
+			Description:  customWorkflow.Description,
+			BaseName:     customWorkflow.BaseName,
+		})
+	}
+
+	return resp, nil
+}
+
+func GetLatestTaskInfo(workflowInfo *Workflow) (startTime int64, creator, status string) {
+	// if we found it is a custom workflow, search it in the custom workflow task
+	if workflowInfo.WorkflowType == setting.CustomWorkflowType {
+		taskInfo, err := getLatestWorkflowTaskV4(workflowInfo.Name)
+		if err != nil {
+			return 0, "", ""
+		}
+		return taskInfo.StartTime, taskInfo.TaskCreator, string(taskInfo.Status)
+	} else {
+		// otherwise it is a product workflow
+		taskInfo, err := getLatestWorkflowTask(workflowInfo.Name)
+		if err != nil {
+			return 0, "", ""
+		}
+		return taskInfo.StartTime, taskInfo.TaskCreator, string(taskInfo.Status)
+	}
 }

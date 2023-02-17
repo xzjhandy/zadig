@@ -18,24 +18,31 @@ package service
 
 import (
 	"fmt"
+	"os"
+	"path"
 	"sync"
 
+	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.uber.org/zap"
 
+	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	templatemodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models/template"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/command"
 	fsservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/fs"
 	"github.com/koderover/zadig/pkg/setting"
+	"github.com/koderover/zadig/pkg/shared/client/systemconfig"
+	e "github.com/koderover/zadig/pkg/tool/errors"
 	"github.com/koderover/zadig/pkg/tool/log"
 	yamlutil "github.com/koderover/zadig/pkg/util/yaml"
 )
 
 type DefaultValuesResp struct {
-	DefaultValues string                     `json:"defaultValues"`
-	YamlData      *templatemodels.CustomYaml `json:"yaml_data,omitempty"`
+	DefaultVariable string                     `json:"default_variable"`
+	YamlData        *templatemodels.CustomYaml `json:"yaml_data,omitempty"`
 }
 
 type YamlContentRequestArg struct {
@@ -152,7 +159,7 @@ func GetDefaultValues(productName, envName string, log *zap.SugaredLogger) (*Def
 	if !existed {
 		return ret, nil
 	}
-	ret.DefaultValues = rendersetObj.DefaultValues
+	ret.DefaultVariable = rendersetObj.DefaultValues
 	err = service.FillGitNamespace(rendersetObj.YamlData)
 	if err != nil {
 		// Note, since user can always reselect the git info, error should not block normal logic
@@ -167,30 +174,62 @@ func GetMergedYamlContent(arg *YamlContentRequestArg, paths []string) (string, e
 		fileContentMap sync.Map
 		wg             sync.WaitGroup
 		err            error
+		errLock        sync.Mutex
 	)
+	detail, err := systemconfig.New().GetCodeHost(arg.CodehostID)
+	if err != nil {
+		log.Errorf("GetGitRepoInfo GetCodehostDetail err:%s", err)
+		return "", e.ErrListRepoDir.AddDesc(err.Error())
+	}
+	if detail.Type == setting.SourceFromOther {
+		err = command.RunGitCmds(detail, arg.Namespace, arg.Namespace, arg.Repo, arg.Branch, "origin")
+		if err != nil {
+			log.Errorf("GetGitRepoInfo runGitCmds err:%s", err)
+			return "", e.ErrListRepoDir.AddDesc(err.Error())
+		}
+	}
+
+	errorList := &multierror.Error{}
+
 	for i, filePath := range paths {
 		wg.Add(1)
-		go func(index int, path string) {
+		go func(index int, filePath string, isOtherTypeRepo bool) {
 			defer wg.Done()
-			fileContent, errDownload := fsservice.DownloadFileFromSource(
-				&fsservice.DownloadFromSourceArgs{
-					CodehostID: arg.CodehostID,
-					Owner:      arg.Owner,
-					Namespace:  arg.Namespace,
-					Repo:       arg.Repo,
-					Path:       path,
-					Branch:     arg.Branch,
-					RepoLink:   arg.RepoLink,
-				})
-			if errDownload != nil {
-				err = errors.Wrapf(errDownload, fmt.Sprintf("failed to download file from git, path %s", path))
-				return
+			if !isOtherTypeRepo {
+				fileContent, errDownload := fsservice.DownloadFileFromSource(
+					&fsservice.DownloadFromSourceArgs{
+						CodehostID: arg.CodehostID,
+						Owner:      arg.Owner,
+						Namespace:  arg.Namespace,
+						Repo:       arg.Repo,
+						Path:       filePath,
+						Branch:     arg.Branch,
+						RepoLink:   arg.RepoLink,
+					})
+				if errDownload != nil {
+					errLock.Lock()
+					errorList = multierror.Append(errorList, errors.Wrapf(errDownload, fmt.Sprintf("failed to download file from git, path %s", filePath)))
+					errLock.Unlock()
+					return
+				}
+				fileContentMap.Store(index, fileContent)
+			} else {
+				base := path.Join(config.S3StoragePath(), arg.Repo)
+				relativePath := path.Join(base, filePath)
+				fileContent, errReadFile := os.ReadFile(relativePath)
+				if errReadFile != nil {
+					errLock.Lock()
+					errorList = multierror.Append(errorList, errors.Wrapf(errReadFile, fmt.Sprintf("failed to read file from git repo, relative path %s", relativePath)))
+					errLock.Unlock()
+					return
+				}
+				fileContentMap.Store(index, fileContent)
 			}
-			fileContentMap.Store(index, fileContent)
-		}(i, filePath)
+		}(i, filePath, detail.Type == setting.SourceFromOther)
 	}
 	wg.Wait()
 
+	err = errorList.ErrorOrNil()
 	if err != nil {
 		return "", err
 	}
@@ -198,7 +237,9 @@ func GetMergedYamlContent(arg *YamlContentRequestArg, paths []string) (string, e
 	contentArr := make([][]byte, 0, len(paths))
 	for i := 0; i < len(paths); i++ {
 		contentObj, _ := fileContentMap.Load(i)
-		contentArr = append(contentArr, contentObj.([]byte))
+		if contentObj != nil {
+			contentArr = append(contentArr, contentObj.([]byte))
+		}
 	}
 	ret, err := yamlutil.Merge(contentArr)
 	if err != nil {

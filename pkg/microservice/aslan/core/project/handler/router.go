@@ -44,7 +44,13 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		product.PUT("/:name/:status", UpdateProductTmplStatus)
 		product.PATCH("/:name", UpdateServiceOrchestration)
 		product.PUT("", UpdateProject)
+		product.PUT("/:name/type", TransferProject)
 		product.DELETE("/:name", DeleteProductTemplate)
+	}
+
+	production := router.Group("production/products")
+	{
+		production.PATCH("/:name", UpdateProductionServiceOrchestration)
 	}
 
 	openSource := router.Group("opensource")

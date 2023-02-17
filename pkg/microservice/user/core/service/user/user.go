@@ -32,9 +32,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	configbase "github.com/koderover/zadig/pkg/config"
+	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/microservice/user/config"
 	"github.com/koderover/zadig/pkg/microservice/user/core"
 	"github.com/koderover/zadig/pkg/microservice/user/core/repository/models"
+	"github.com/koderover/zadig/pkg/microservice/user/core/repository/mongodb"
 	"github.com/koderover/zadig/pkg/microservice/user/core/repository/orm"
 	"github.com/koderover/zadig/pkg/microservice/user/core/service/login"
 	"github.com/koderover/zadig/pkg/setting"
@@ -89,6 +91,12 @@ type RetrieveResp struct {
 	Email string `json:"email"`
 }
 
+type UserSetting struct {
+	Theme        string `json:"theme"`
+	LogBgColor   string `json:"log_bg_color"`
+	LogFontColor string `json:"log_font_color"`
+}
+
 func SearchAndSyncUser(ldapId string, logger *zap.SugaredLogger) error {
 	systemConfigClient := systemconfig.New()
 	si, err := systemConfigClient.GetLDAPConnector(ldapId)
@@ -101,7 +109,11 @@ func SearchAndSyncUser(ldapId string, logger *zap.SugaredLogger) error {
 		return fmt.Errorf("can't find connector")
 	}
 
-	config := si.Config.(*ldap.Config)
+	config := new(ldap.Config)
+	err = commonmodels.IToi(si.Config, config)
+	if err != nil {
+		return err
+	}
 	l, err := ldapv3.Dial("tcp", config.Host)
 	if err != nil {
 		logger.Errorf("ldap dial host:%s error, error msg:%s", config.Host, err)
@@ -198,6 +210,31 @@ func GetUser(uid string, logger *zap.SugaredLogger) (*types.UserInfo, error) {
 		}
 	}
 	return userInfoRes, nil
+}
+
+func GetUserSetting(uid string, logger *zap.SugaredLogger) (*types.UserSetting, error) {
+	user, err := orm.GetUserByUid(uid, core.DB)
+	if err != nil {
+		logger.Errorf("GetUser getUserByUid:%s error, error msg:%s", uid, err.Error())
+		return nil, err
+	}
+	if user == nil {
+		return nil, nil
+	}
+	userSetting, err := mongodb.NewUserSettingColl().GetUserSettingByUid(uid)
+	if err != nil {
+		logger.Errorf("GetUser GetUserSettingByUid:%s error, error msg:%s", uid, err.Error())
+		return nil, err
+	}
+	ret := &types.UserSetting{
+		Uid: uid,
+	}
+	if userSetting != nil {
+		ret.Theme = userSetting.Theme
+		ret.LogBgColor = userSetting.LogBgColor
+		ret.LogFontColor = userSetting.LogFontColor
+	}
+	return ret, nil
 }
 
 func SearchUserByAccount(args *QueryArgs, logger *zap.SugaredLogger) (*types.UsersResp, error) {
@@ -328,6 +365,12 @@ func DeleteUserByUID(uid string, logger *zap.SugaredLogger) error {
 		logger.Errorf("DeleteUserByUID DeleteUserLoginByUid:%s error, error msg:%s", uid, err.Error())
 		return err
 	}
+	err = mongodb.NewUserSettingColl().DeleteUserSettingByUid(uid)
+	if err != nil {
+		tx.Rollback()
+		logger.Errorf("DeleteUserByUID DeleteUserSettingByUid:%s error, error msg:%s", uid, err.Error())
+		return err
+	}
 	return tx.Commit().Error
 }
 
@@ -448,7 +491,20 @@ func UpdateUser(uid string, args *UpdateUserInfo, _ *zap.SugaredLogger) error {
 		Phone: args.Phone,
 	}
 	return orm.UpdateUser(uid, user, core.DB)
+}
 
+func UpdateUserSetting(uid string, args *UserSetting) error {
+	userSetting := &models.UserSetting{
+		UID:          uid,
+		Theme:        args.Theme,
+		LogBgColor:   args.LogBgColor,
+		LogFontColor: args.LogFontColor,
+	}
+	err := mongodb.NewUserSettingColl().UpsertUserSetting(userSetting)
+	if err != nil {
+		return e.ErrUpdateUser.AddErr(err)
+	}
+	return nil
 }
 
 func UpdatePassword(args *Password, logger *zap.SugaredLogger) error {

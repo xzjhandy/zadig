@@ -243,7 +243,6 @@ func (c *ProductColl) Create(args *template.Product) error {
 }
 
 func (c *ProductColl) UpdateServiceOrchestration(productName string, services [][]string, updateBy string) error {
-
 	query := bson.M{"product_name": productName}
 	change := bson.M{"$set": bson.M{
 		"services":    services,
@@ -251,6 +250,31 @@ func (c *ProductColl) UpdateServiceOrchestration(productName string, services []
 		"update_by":   updateBy,
 	}}
 
+	_, err := c.UpdateOne(context.TODO(), query, change)
+	return err
+}
+
+func (c *ProductColl) UpdateProductionServiceOrchestration(productName string, services [][]string, updateBy string) error {
+	query := bson.M{"product_name": productName}
+	change := bson.M{"$set": bson.M{
+		"production_services": services,
+		"update_time":         time.Now().Unix(),
+		"update_by":           updateBy,
+	}}
+
+	_, err := c.UpdateOne(context.TODO(), query, change)
+	return err
+}
+
+func (c *ProductColl) UpdateProductFeature(productName string, productFeature *template.ProductFeature, updateBy string) error {
+	query := bson.M{"product_name": productName}
+	change := bson.M{"$set": bson.M{
+		"update_time":                     time.Now().Unix(),
+		"update_by":                       updateBy,
+		"product_feature.deploy_type":     productFeature.DeployType,
+		"product_feature.create_env_type": productFeature.CreateEnvType,
+		"product_feature.basic_facility":  productFeature.BasicFacility,
+	}}
 	_, err := c.UpdateOne(context.TODO(), query, change)
 	return err
 }
@@ -269,6 +293,7 @@ func (c *ProductColl) Update(productName string, args *template.Product) error {
 		"project_name":          strings.TrimSpace(args.ProjectName),
 		"revision":              args.Revision,
 		"services":              args.Services,
+		"production_services":   args.ProductionServices,
 		"update_time":           time.Now().Unix(),
 		"update_by":             args.UpdateBy,
 		"enabled":               args.Enabled,

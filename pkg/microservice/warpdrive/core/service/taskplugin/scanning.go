@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/koderover/zadig/pkg/tool/kube/updater"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"go.uber.org/zap"
@@ -37,6 +36,8 @@ import (
 	"github.com/koderover/zadig/pkg/microservice/warpdrive/core/service/types/task"
 	"github.com/koderover/zadig/pkg/setting"
 	krkubeclient "github.com/koderover/zadig/pkg/tool/kube/client"
+	"github.com/koderover/zadig/pkg/tool/kube/label"
+	"github.com/koderover/zadig/pkg/tool/kube/updater"
 )
 
 func InitializeScanningTaskPlugin(taskType config.TaskType) TaskPlugin {
@@ -45,6 +46,7 @@ func InitializeScanningTaskPlugin(taskType config.TaskType) TaskPlugin {
 		kubeClient: krkubeclient.Client(),
 		clientset:  krkubeclient.Clientset(),
 		restConfig: krkubeclient.RESTConfig(),
+		apiReader:  krkubeclient.APIReader(),
 	}
 }
 
@@ -56,8 +58,10 @@ type ScanPlugin struct {
 	kubeClient    client.Client
 	clientset     kubernetes.Interface
 	restConfig    *rest.Config
+	apiReader     client.Reader
 	Task          *task.Scanning
 	Log           *zap.SugaredLogger
+	Timeout       <-chan time.Time
 }
 
 func (p *ScanPlugin) SetAckFunc(func()) {
@@ -101,7 +105,7 @@ func (p *ScanPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 	default:
 		p.KubeNamespace = setting.AttachedClusterNamespace
 
-		crClient, clientset, restConfig, err := GetK8sClients(pipelineTask.ConfigPayload.HubServerAddr, p.Task.ClusterID)
+		crClient, clientset, restConfig, apiReader, err := GetK8sClients(pipelineTask.ConfigPayload.HubServerAddr, p.Task.ClusterID)
 		if err != nil {
 			p.Log.Error(err)
 			p.Task.Status = config.StatusFailed
@@ -112,12 +116,13 @@ func (p *ScanPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 		p.kubeClient = crClient
 		p.clientset = clientset
 		p.restConfig = restConfig
+		p.apiReader = apiReader
 	}
 
 	// Since only one repository is supported per scanning, we just hard code it
 	repo := &task.Repository{
 		Source:             p.Task.Repos[0].Source,
-		RepoOwner:          p.Task.Repos[0].RepoOwner,
+		RepoOwner:          p.Task.Repos[0].RepoNamespace,
 		RepoName:           p.Task.Repos[0].RepoName,
 		Branch:             p.Task.Repos[0].Branch,
 		PR:                 p.Task.Repos[0].PR,
@@ -172,7 +177,7 @@ func (p *ScanPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 		return
 	}
 
-	jobLabel := &JobLabel{
+	jobLabel := &label.JobLabel{
 		PipelineName: pipelineTask.PipelineName,
 		ServiceName:  serviceName,
 		TaskID:       pipelineTask.TaskID,
@@ -238,12 +243,10 @@ func (p *ScanPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 	if !jobExist {
 		p.Log.Infof("Job %s:%d does not exist. Create.", pipelineTask.PipelineName, pipelineTask.TaskID)
 
+		p.Task.Registries = getMatchedRegistries(p.Task.ImageInfo, p.Task.Registries)
 		// search namespace should also include desired namespace
 		job, err := buildJobWithLinkedNs(
 			p.Type(), p.Task.ImageInfo, p.JobName, serviceName, p.Task.ClusterID, pipelineTask.ConfigPayload.Test.KubeNamespace, p.Task.ResReq, p.Task.ResReqSpec, pipelineCtx, pipelineTask, p.Task.Registries,
-			p.KubeNamespace,
-			// this is a useless field, so we will just leave it empty
-			"",
 		)
 
 		job.Namespace = p.KubeNamespace
@@ -274,13 +277,19 @@ func (p *ScanPlugin) Run(ctx context.Context, pipelineTask *task.Task, pipelineC
 	}
 
 	p.Log.Infof("succeed to create build job %s", p.JobName)
-
-	p.Task.Status = waitJobReady(ctx, p.KubeNamespace, p.JobName, p.kubeClient, p.Log)
+	p.Timeout = time.After(time.Duration(p.TaskTimeout()) * time.Second)
+	p.Task.Status, err = waitJobReady(ctx, p.KubeNamespace, p.JobName, p.kubeClient, p.apiReader, p.Timeout, p.Log)
+	if err != nil {
+		p.Task.Error = err.Error()
+	}
 }
 
 func (p *ScanPlugin) Wait(ctx context.Context) {
-	status := waitJobEndWithFile(ctx, p.TaskTimeout(), p.KubeNamespace, p.JobName, true, p.kubeClient, p.clientset, p.restConfig, p.Log)
+	status, err := waitJobEndWithFile(ctx, p.TaskTimeout(), p.Timeout, p.KubeNamespace, p.JobName, true, p.kubeClient, p.clientset, p.restConfig, p.Log)
 	p.SetStatus(status)
+	if err != nil {
+		p.Task.Error = err.Error()
+	}
 }
 
 func (p *ScanPlugin) tmpSetTaskTimeout(durationInSeconds int) {
@@ -288,7 +297,7 @@ func (p *ScanPlugin) tmpSetTaskTimeout(durationInSeconds int) {
 }
 
 func (p *ScanPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serviceName string) {
-	jobLabel := &JobLabel{
+	jobLabel := &label.JobLabel{
 		PipelineName: pipelineTask.PipelineName,
 		ServiceName:  serviceName,
 		TaskID:       pipelineTask.TaskID,
@@ -312,7 +321,9 @@ func (p *ScanPlugin) Complete(ctx context.Context, pipelineTask *task.Task, serv
 	err := saveContainerLog(pipelineTask, p.KubeNamespace, p.Task.ClusterID, p.FileName, jobLabel, p.kubeClient)
 	if err != nil {
 		p.Log.Error(err)
-		p.Task.Error = err.Error()
+		if p.Task.Error == "" {
+			p.Task.Error = err.Error()
+		}
 		return
 	}
 }

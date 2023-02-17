@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v2"
 
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
@@ -47,11 +47,11 @@ type junitReportCtl struct {
 func NewJunitReportCtl(stepTask *commonmodels.StepTask, log *zap.SugaredLogger) (*junitReportCtl, error) {
 	yamlString, err := yaml.Marshal(stepTask.Spec)
 	if err != nil {
-		return nil, fmt.Errorf("marshal git spec error: %v", err)
+		return nil, fmt.Errorf("marshal junit report spec error: %v", err)
 	}
 	junitReportSpec := &step.StepJunitReportSpec{}
 	if err := yaml.Unmarshal(yamlString, &junitReportSpec); err != nil {
-		return nil, fmt.Errorf("unmarshal git spec error: %v", err)
+		return nil, fmt.Errorf("unmarshal junit report spec error: %v", err)
 	}
 	stepTask.Spec = junitReportSpec
 	return &junitReportCtl{junitReportSpec: junitReportSpec, log: log, step: stepTask}, nil
@@ -97,7 +97,7 @@ func (s *junitReportCtl) AfterRun(ctx context.Context) error {
 	if storage.Provider == setting.ProviderSourceAli {
 		forcedPathStyle = false
 	}
-	client, err := s3tool.NewClient(storage.Endpoint, storage.Ak, storage.Sk, storage.Insecure, forcedPathStyle)
+	client, err := s3tool.NewClient(storage.Endpoint, storage.Ak, storage.Sk, storage.Region, storage.Insecure, forcedPathStyle)
 	if err != nil {
 		log.Errorf("NewClient err:%v", err)
 		return err

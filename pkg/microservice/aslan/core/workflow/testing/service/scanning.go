@@ -39,6 +39,7 @@ import (
 	"github.com/koderover/zadig/pkg/setting"
 	"github.com/koderover/zadig/pkg/shared/client/systemconfig"
 	e "github.com/koderover/zadig/pkg/tool/errors"
+	"github.com/koderover/zadig/pkg/tool/sonar"
 	"github.com/koderover/zadig/pkg/types"
 )
 
@@ -146,6 +147,7 @@ func ListScanningModule(projectName string, log *zap.SugaredLogger) ([]*ListScan
 			Repos:     scanning.Repos,
 			CreatedAt: scanning.CreatedAt,
 			UpdatedAt: scanning.UpdatedAt,
+			ClusterID: scanning.AdvancedSetting.ClusterID,
 		})
 	}
 	return resp, total, nil
@@ -254,7 +256,7 @@ func CreateScanningTask(id string, req []*ScanningRepoInfo, notificationID, user
 		if repoInfo.PR > 0 && len(repoInfo.PRs) == 0 {
 			repoInfo.PRs = []int{repoInfo.PR}
 		}
-
+		repoInfo.RepoNamespace = repoInfo.GetRepoNamespace()
 		repos = append(repos, repoInfo)
 	}
 
@@ -443,7 +445,12 @@ func GetScanningTaskInfo(scanningID string, taskID int64, log *zap.SugaredLogger
 			log.Errorf("failed to get sonar integration info, error: %s", err)
 			return nil, err
 		}
-		resultAddr = sonarInfo.ServerAddress
+
+		projectKey := sonar.GetSonarProjectKeyFromConfig(scanningInfo.Parameter)
+		resultAddr, err = sonar.GetSonarAddressWithProjectKey(sonarInfo.ServerAddress, projectKey)
+		if err != nil {
+			log.Errorf("failed to get sonar address with project key, error: %s", err)
+		}
 	}
 
 	repoInfo := resp.Stages[0].SubTasks[scanningInfo.Name]

@@ -45,6 +45,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	{
 		pvcs.GET("/:envName", ListPvcs)
 	}
+
 	commonEnvCfgs := router.Group("envcfgs")
 	{
 		commonEnvCfgs.GET("/:envName/cfg/:objectName", ListCommonEnvCfgHistory)
@@ -78,7 +79,6 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	export := router.Group("export")
 	{
 		export.GET("/service", ExportYaml)
-		// export.GET("/pipelines/:name", ExportBuildYaml)
 	}
 
 	// ---------------------------------------------------------------------------------------
@@ -108,6 +108,9 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		kube.GET("/workloads", ListWorkloads)
 		kube.GET("/nodes", ListNodes)
 
+		kube.POST("/k8s/resources", GetResourceDeployStatus)
+		kube.POST("/helm/releases", GetReleaseDeployStatus)
+
 		kube.POST("/:env/pods/:podName/debugcontainer", PatchDebugContainer)
 
 		kube.GET("/pods/:podName/file", DownloadFileFromPod)
@@ -117,6 +120,11 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		kube.GET("/custom_workload/cluster/:clusterID/namespace/:namespace", ListCustomWorkload)
 		kube.GET("/canary_service/cluster/:clusterID/namespace/:namespace", ListCanaryDeploymentServiceInfo)
 		kube.GET("/resources/cluster/:clusterID/namespace/:namespace", ListAllK8sResourcesInNamespace)
+
+		kube.GET("/workloads/:workloadType", ListK8sResOverview)
+		kube.GET("/workloads/:workloadType/:workloadName", GetK8sWorkflowDetail)
+		kube.GET("/resources/:resourceType", ListK8sResOverview)
+		kube.GET("/yaml", GetK8sResourceYaml)
 	}
 
 	operations := router.Group("operations")
@@ -134,17 +142,20 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		environments.PUT("/:name/registry", UpdateProductRegistry)
 		environments.PUT("", UpdateMultiProducts)
 		environments.POST("", CreateProduct)
+
 		environments.GET("/:name", GetProduct)
 		environments.PUT("/:name/envRecycle", UpdateProductRecycleDay)
+		environments.PUT("/:name/alias", UpdateProductAlias)
+		environments.POST("/:name/affectedservices", AffectedServices)
 		environments.POST("/:name/estimated-values", EstimatedValues)
 		environments.PUT("/:name/renderset", UpdateHelmProductRenderset)
 		environments.PUT("/:name/helm/default-values", UpdateHelmProductDefaultValues)
+		environments.PUT("/:name/k8s/default-values", UpdateK8sProductDefaultValues)
 		environments.PUT("/:name/helm/charts", UpdateHelmProductCharts)
 		environments.PUT("/:name/syncVariables", SyncHelmProductRenderset)
 		environments.GET("/:name/helmChartVersions", GetHelmChartVersions)
 		environments.GET("/:name/productInfo", GetProductInfo)
 		environments.DELETE("/:name", DeleteProduct)
-		environments.PUT("/:name/services", DeleteProductServices)
 		environments.GET("/:name/groups", ListGroups)
 		environments.GET("/:name/workloads", ListWorkloadsInEnv)
 
@@ -153,11 +164,11 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		environments.GET("/:name/helm/charts", GetChartInfos)
 		environments.GET("/:name/helm/images", GetImageInfos)
 
+		environments.PUT("/:name/services", DeleteProductServices)
 		environments.GET("/:name/services/:serviceName", GetService)
 		environments.PUT("/:name/services/:serviceName", UpdateService)
 		environments.POST("/:name/services/:serviceName/restart", RestartService)
-		environments.POST("/:name/services/:serviceName/restartNew", RestartNewService)
-		environments.POST("/:name/services/:serviceName/scale", ScaleService)
+		environments.POST("/:name/services/:serviceName/restartNew", RestartWorkload)
 		environments.POST("/:name/services/:serviceName/scaleNew", ScaleNewService)
 		environments.GET("/:name/services/:serviceName/containers/:container", GetServiceContainer)
 
@@ -172,6 +183,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 
 		environments.POST("/:name/services/:serviceName/devmode/patch", PatchWorkload)
 		environments.POST("/:name/services/:serviceName/devmode/recover", RecoverWorkload)
+
 	}
 
 	// ---------------------------------------------------------------------------------------
@@ -182,6 +194,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		rendersets.GET("/renderchart", GetServiceRenderCharts)
 		rendersets.GET("/default-values", GetProductDefaultValues)
 		rendersets.GET("/yamlContent", GetYamlContent)
+		rendersets.GET("/variables", GetServiceVariables)
 	}
 
 	// ---------------------------------------------------------------------------------------

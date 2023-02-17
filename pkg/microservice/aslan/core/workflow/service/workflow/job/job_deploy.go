@@ -18,6 +18,7 @@ package job
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
@@ -51,7 +52,7 @@ func (j *DeployJob) SetPreset() error {
 
 	project, err := templaterepo.NewProductColl().Find(j.workflow.Project)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to find project %s, err: %v", j.workflow.Project, err)
 	}
 	if project.ProductFeature != nil {
 		j.spec.DeployType = project.ProductFeature.DeployType
@@ -98,7 +99,7 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 
 	project, err := templaterepo.NewProductColl().Find(j.workflow.Project)
 	if err != nil {
-		return resp, err
+		return resp, fmt.Errorf("failed to find project %s, err: %v", j.workflow.Project, err)
 	}
 
 	productServiceMap := product.GetServiceMap()
@@ -106,7 +107,7 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 	if project.ProductFeature != nil && project.ProductFeature.CreateEnvType == setting.SourceFromExternal {
 		productServices, err := commonrepo.NewServiceColl().ListExternalWorkloadsBy(j.workflow.Project, j.spec.Env)
 		if err != nil {
-			return resp, err
+			return resp, fmt.Errorf("failed to list external workload, err: %v", err)
 		}
 		for _, service := range productServices {
 			productServiceMap[service.ServiceName] = &commonmodels.ProductService{
@@ -131,19 +132,36 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		j.spec.ServiceAndImages = []*commonmodels.ServiceAndImage{}
 		for _, stage := range j.workflow.Stages {
 			for _, job := range stage.Jobs {
-				if job.JobType != config.JobZadigBuild || job.Name != j.spec.JobName {
+				if job.Name != j.spec.JobName {
 					continue
 				}
-				buildSpec := &commonmodels.ZadigBuildJobSpec{}
-				if err := commonmodels.IToi(job.Spec, buildSpec); err != nil {
-					return resp, err
+				// get deploy target from previous build job
+				if job.JobType == config.JobZadigBuild {
+					buildSpec := &commonmodels.ZadigBuildJobSpec{}
+					if err := commonmodels.IToi(job.Spec, buildSpec); err != nil {
+						return resp, err
+					}
+					for _, build := range buildSpec.ServiceAndBuilds {
+						j.spec.ServiceAndImages = append(j.spec.ServiceAndImages, &commonmodels.ServiceAndImage{
+							ServiceName:   build.ServiceName,
+							ServiceModule: build.ServiceModule,
+							Image:         build.Image,
+						})
+					}
 				}
-				for _, build := range buildSpec.ServiceAndBuilds {
-					j.spec.ServiceAndImages = append(j.spec.ServiceAndImages, &commonmodels.ServiceAndImage{
-						ServiceName:   build.ServiceName,
-						ServiceModule: build.ServiceModule,
-						Image:         build.Image,
-					})
+				// get deploy target from previous distribute job
+				if job.JobType == config.JobZadigDistributeImage {
+					distributeSpec := &commonmodels.ZadigDistributeImageJobSpec{}
+					if err := commonmodels.IToi(job.Spec, distributeSpec); err != nil {
+						return resp, err
+					}
+					for _, distribute := range distributeSpec.Tatgets {
+						j.spec.ServiceAndImages = append(j.spec.ServiceAndImages, &commonmodels.ServiceAndImage{
+							ServiceName:   distribute.ServiceName,
+							ServiceModule: distribute.ServiceModule,
+							Image:         distribute.TargetImage,
+						})
+					}
 				}
 			}
 		}
@@ -164,6 +182,7 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			}
 			jobTask := &commonmodels.JobTask{
 				Name:    jobNameFormat(deploy.ServiceName + "-" + deploy.ServiceModule + "-" + j.job.Name),
+				Key:     strings.Join([]string{j.job.Name, deploy.ServiceName, deploy.ServiceModule}, "."),
 				JobType: string(config.JobZadigDeploy),
 				Spec:    jobTaskSpec,
 			}
@@ -210,6 +229,7 @@ func (j *DeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			}
 			jobTask := &commonmodels.JobTask{
 				Name:    jobNameFormat(serviceName + "-" + j.job.Name),
+				Key:     strings.Join([]string{j.job.Name, serviceName}, "."),
 				JobType: string(config.JobZadigHelmDeploy),
 				Spec:    jobTaskSpec,
 			}

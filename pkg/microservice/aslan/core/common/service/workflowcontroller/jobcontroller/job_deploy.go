@@ -22,21 +22,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	crClient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
 	"github.com/koderover/zadig/pkg/setting"
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	"github.com/koderover/zadig/pkg/shared/kube/wrapper"
 	"github.com/koderover/zadig/pkg/tool/kube/getter"
 	"github.com/koderover/zadig/pkg/tool/kube/updater"
-	"github.com/pkg/errors"
 )
 
 type DeployJobCtl struct {
@@ -55,6 +58,7 @@ func NewDeployJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.Workfl
 	if err := commonmodels.IToi(job.Spec, jobTaskSpec); err != nil {
 		logger.Error(err)
 	}
+	job.Spec = jobTaskSpec
 	return &DeployJobCtl{
 		job:         job,
 		workflowCtx: workflowCtx,
@@ -67,6 +71,8 @@ func NewDeployJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.Workfl
 func (c *DeployJobCtl) Clean(ctx context.Context) {}
 
 func (c *DeployJobCtl) Run(ctx context.Context) {
+	c.job.Status = config.StatusRunning
+	c.ack()
 	if err := c.run(ctx); err != nil {
 		return
 	}
@@ -111,7 +117,6 @@ func (c *DeployJobCtl) run(ctx context.Context) error {
 	// get servcie info
 	var (
 		serviceInfo *commonmodels.Service
-		selector    labels.Selector
 	)
 	serviceInfo, err = commonrepo.NewServiceColl().Find(
 		&commonrepo.ServiceFindOption{
@@ -136,17 +141,9 @@ func (c *DeployJobCtl) run(ctx context.Context) error {
 	}
 
 	if serviceInfo.WorkloadType == "" {
-		selector = labels.Set{setting.ProductLabel: c.workflowCtx.ProjectName, setting.ServiceLabel: c.jobTaskSpec.ServiceName}.AsSelector()
-
 		var deployments []*appsv1.Deployment
-		deployments, err = getter.ListDeployments(env.Namespace, selector, c.kubeClient)
-		if err != nil {
-			logError(c.job, err.Error(), c.logger)
-			return err
-		}
-
 		var statefulSets []*appsv1.StatefulSet
-		statefulSets, err = getter.ListStatefulSets(env.Namespace, selector, c.kubeClient)
+		deployments, statefulSets, err = kube.FetchRelatedWorkloads(env.Namespace, c.jobTaskSpec.ServiceName, env, c.kubeClient)
 		if err != nil {
 			logError(c.job, err.Error(), c.logger)
 			return err
@@ -169,6 +166,7 @@ func (c *DeployJobCtl) run(ctx context.Context) error {
 						Name:      deploy.Name,
 					})
 					replaced = true
+					c.jobTaskSpec.RelatedPodLabels = append(c.jobTaskSpec.RelatedPodLabels, deploy.Spec.Template.Labels)
 					break L
 				}
 			}
@@ -190,6 +188,7 @@ func (c *DeployJobCtl) run(ctx context.Context) error {
 						Name:      sts.Name,
 					})
 					replaced = true
+					c.jobTaskSpec.RelatedPodLabels = append(c.jobTaskSpec.RelatedPodLabels, sts.Spec.Template.Labels)
 					break Loop
 				}
 			}
@@ -198,9 +197,16 @@ func (c *DeployJobCtl) run(ctx context.Context) error {
 		switch serviceInfo.WorkloadType {
 		case setting.StatefulSet:
 			var statefulSet *appsv1.StatefulSet
-			statefulSet, _, err = getter.GetStatefulSet(env.Namespace, c.jobTaskSpec.ServiceName, c.kubeClient)
+			var found bool
+			statefulSet, found, err = getter.GetStatefulSet(env.Namespace, c.jobTaskSpec.ServiceName, c.kubeClient)
 			if err != nil {
+				logError(c.job, err.Error(), c.logger)
 				return err
+			}
+			if !found {
+				msg := fmt.Sprintf("statefulset %s not found", c.jobTaskSpec.ServiceName)
+				logError(c.job, msg, c.logger)
+				return errors.New(msg)
 			}
 			for _, container := range statefulSet.Spec.Template.Spec.Containers {
 				if container.Name == c.jobTaskSpec.ServiceModule {
@@ -222,9 +228,16 @@ func (c *DeployJobCtl) run(ctx context.Context) error {
 			}
 		case setting.Deployment:
 			var deployment *appsv1.Deployment
-			deployment, _, err = getter.GetDeployment(env.Namespace, c.jobTaskSpec.ServiceName, c.kubeClient)
+			var found bool
+			deployment, found, err = getter.GetDeployment(env.Namespace, c.jobTaskSpec.ServiceName, c.kubeClient)
 			if err != nil {
+				logError(c.job, err.Error(), c.logger)
 				return err
+			}
+			if !found {
+				msg := fmt.Sprintf("deployment %s not found", c.jobTaskSpec.ServiceName)
+				logError(c.job, msg, c.logger)
+				return errors.New(msg)
 			}
 			for _, container := range deployment.Spec.Template.Spec.Containers {
 				if container.Name == c.jobTaskSpec.ServiceModule {
@@ -251,14 +264,39 @@ func (c *DeployJobCtl) run(ctx context.Context) error {
 		logError(c.job, msg, c.logger)
 		return errors.New(msg)
 	}
+	if err := updateProductImageByNs(env.Namespace, c.workflowCtx.ProjectName, c.jobTaskSpec.ServiceName, map[string]string{c.jobTaskSpec.ServiceModule: c.jobTaskSpec.Image}, c.logger); err != nil {
+		c.logger.Error(err)
+	}
 	c.job.Spec = c.jobTaskSpec
+	return nil
+}
+
+func workLoadDeployStat(kubeClient client.Client, namespace string, labelMaps []map[string]string) error {
+	for _, label := range labelMaps {
+		selector := labels.Set(label).AsSelector()
+		pods, err := getter.ListPods(namespace, selector, kubeClient)
+		if err != nil {
+			return err
+		}
+		for _, pod := range pods {
+			allContainerStatuses := make([]corev1.ContainerStatus, 0)
+			allContainerStatuses = append(allContainerStatuses, pod.Status.InitContainerStatuses...)
+			allContainerStatuses = append(allContainerStatuses, pod.Status.ContainerStatuses...)
+			for _, cs := range allContainerStatuses {
+				if cs.State.Waiting != nil {
+					switch cs.State.Waiting.Reason {
+					case "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff", "ErrImageNeverPull":
+						return fmt.Errorf("pod: %s, %s: %s", pod.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message)
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 
 func (c *DeployJobCtl) wait(ctx context.Context) {
 	timeout := time.After(time.Duration(c.timeout()) * time.Second)
-
-	selector := labels.Set{setting.ProductLabel: c.workflowCtx.ProjectName, setting.ServiceLabel: c.jobTaskSpec.ServiceName}.AsSelector()
 
 	for {
 		select {
@@ -267,28 +305,30 @@ func (c *DeployJobCtl) wait(ctx context.Context) {
 			return
 
 		case <-timeout:
-			pods, err := getter.ListPods(c.namespace, selector, c.kubeClient)
-			if err != nil {
-				msg := fmt.Sprintf("list pods error: %v", err)
-				logError(c.job, msg, c.logger)
-				return
-			}
-
 			var msg []string
-			for _, pod := range pods {
-				podResource := wrapper.Pod(pod).Resource()
-				if podResource.Status != setting.StatusRunning && podResource.Status != setting.StatusSucceeded {
-					for _, cs := range podResource.ContainerStatuses {
-						// message为空不认为是错误状态，有可能还在waiting
-						if cs.Message != "" {
-							msg = append(msg, fmt.Sprintf("Status: %s, Reason: %s, Message: %s", cs.Status, cs.Reason, cs.Message))
+			for _, label := range c.jobTaskSpec.RelatedPodLabels {
+				selector := labels.Set(label).AsSelector()
+				pods, err := getter.ListPods(c.namespace, selector, c.kubeClient)
+				if err != nil {
+					msg := fmt.Sprintf("list pods error: %v", err)
+					logError(c.job, msg, c.logger)
+					return
+				}
+				for _, pod := range pods {
+					podResource := wrapper.Pod(pod).Resource()
+					if podResource.Status != setting.StatusRunning && podResource.Status != setting.StatusSucceeded {
+						for _, cs := range podResource.ContainerStatuses {
+							// message为空不认为是错误状态，有可能还在waiting
+							if cs.Message != "" {
+								msg = append(msg, fmt.Sprintf("Status: %s, Reason: %s, Message: %s", cs.Status, cs.Reason, cs.Message))
+							}
 						}
 					}
 				}
 			}
 
 			if len(msg) != 0 {
-				err = errors.New(strings.Join(msg, "\n"))
+				err := errors.New(strings.Join(msg, "\n"))
 				logError(c.job, err.Error(), c.logger)
 				return
 			}
@@ -301,6 +341,10 @@ func (c *DeployJobCtl) wait(ctx context.Context) {
 			var err error
 		L:
 			for _, resource := range c.jobTaskSpec.ReplaceResources {
+				if err := workLoadDeployStat(c.kubeClient, c.namespace, c.jobTaskSpec.RelatedPodLabels); err != nil {
+					logError(c.job, err.Error(), c.logger)
+					return
+				}
 				switch resource.Kind {
 				case setting.Deployment:
 					d, found, e := getter.GetDeployment(c.namespace, resource.Name, c.kubeClient)

@@ -46,6 +46,7 @@ type BuildResp struct {
 	UpdateBy    string                              `json:"update_by"`
 	Pipelines   []string                            `json:"pipelines"`
 	ProductName string                              `json:"productName"`
+	ClusterID   string                              `json:"cluster_id"`
 }
 
 type ServiceModuleAndBuildResp struct {
@@ -127,6 +128,26 @@ func ListBuildModulesByServiceModule(encryptedKey, productName string, excludeJe
 
 	serviceModuleAndBuildResp := make([]*ServiceModuleAndBuildResp, 0)
 	for _, serviceTmpl := range services {
+		if serviceTmpl.Type == setting.PMDeployType {
+			buildModule, err := commonrepo.NewBuildColl().Find(&commonrepo.BuildFindOption{Name: serviceTmpl.BuildName})
+			if err != nil {
+				log.Errorf("find build module info error: %v", err)
+				continue
+			}
+			build := &BuildResp{
+				ID:        buildModule.ID.Hex(),
+				Name:      buildModule.Name,
+				KeyVals:   buildModule.PreBuild.Envs,
+				Repos:     buildModule.Repos,
+				ClusterID: buildModule.PreBuild.ClusterID,
+			}
+			serviceModuleAndBuildResp = append(serviceModuleAndBuildResp, &ServiceModuleAndBuildResp{
+				ServiceName:   serviceTmpl.ServiceName,
+				ServiceModule: serviceTmpl.ServiceName,
+				ModuleBuilds:  []*BuildResp{build},
+			})
+			continue
+		}
 		for _, container := range serviceTmpl.Containers {
 			opt := &commonrepo.BuildListOption{
 				ServiceName: serviceTmpl.ServiceName,
@@ -164,16 +185,18 @@ func ListBuildModulesByServiceModule(encryptedKey, productName string, excludeJe
 							build.Repos = target.Repos
 						}
 					}
+					build.PreBuild.ClusterID = buildTemplate.PreBuild.ClusterID
 					build.PreBuild.Envs = commonservice.MergeBuildEnvs(templateEnvs, build.PreBuild.Envs)
 				}
 				if err := commonservice.EncryptKeyVals(encryptedKey, build.PreBuild.Envs, log); err != nil {
 					return serviceModuleAndBuildResp, err
 				}
 				resp = append(resp, &BuildResp{
-					ID:      build.ID.Hex(),
-					Name:    build.Name,
-					KeyVals: build.PreBuild.Envs,
-					Repos:   build.Repos,
+					ID:        build.ID.Hex(),
+					Name:      build.Name,
+					KeyVals:   build.PreBuild.Envs,
+					Repos:     build.Repos,
+					ClusterID: build.PreBuild.ClusterID,
 				})
 			}
 			serviceModuleAndBuildResp = append(serviceModuleAndBuildResp, &ServiceModuleAndBuildResp{
@@ -213,14 +236,17 @@ func CreateBuild(username string, build *commonmodels.Build, log *zap.SugaredLog
 	if len(build.Name) == 0 {
 		return e.ErrCreateBuildModule.AddDesc("empty name")
 	}
-	if err := commonutil.CheckDefineResourceParam(build.PreBuild.ResReq, build.PreBuild.ResReqSpec); err != nil {
-		return e.ErrCreateBuildModule.AddDesc(err.Error())
-	}
 
 	build.UpdateBy = username
 	err := correctFields(build)
 	if err != nil {
 		return err
+	}
+
+	if build.TemplateID == "" {
+		if err := commonutil.CheckDefineResourceParam(build.PreBuild.ResReq, build.PreBuild.ResReqSpec); err != nil {
+			return e.ErrCreateBuildModule.AddDesc(err.Error())
+		}
 	}
 
 	if err := commonrepo.NewBuildColl().Create(build); err != nil {
@@ -263,20 +289,32 @@ func UpdateBuild(username string, build *commonmodels.Build, log *zap.SugaredLog
 	return nil
 }
 
+// TODO how about this situation? multiple builds bound with same service
 func updateCvmService(currentBuild, oldBuild *commonmodels.Build) error {
-	deleteServices := sets.NewString()
+	modifiedSvcBuildMap := make(map[string]string)
+
 	currentServiceModuleKey := sets.NewString()
+	oldServiceModuleKey := sets.NewString()
 	for _, currentServiceModule := range currentBuild.Targets {
 		currentServiceModuleKey.Insert(fmt.Sprintf("%s-%s-%s", currentServiceModule.ProductName, currentServiceModule.ServiceName, currentServiceModule.ServiceModule))
+	}
+	for _, oldServiceModule := range oldBuild.Targets {
+		oldServiceModuleKey.Insert(fmt.Sprintf("%s-%s-%s", oldServiceModule.ProductName, oldServiceModule.ServiceName, oldServiceModule.ServiceModule))
 	}
 
 	for _, oldServiceModule := range oldBuild.Targets {
 		if !currentServiceModuleKey.Has(fmt.Sprintf("%s-%s-%s", oldServiceModule.ProductName, oldServiceModule.ServiceName, oldServiceModule.ServiceModule)) {
-			deleteServices.Insert(oldServiceModule.ServiceName)
+			modifiedSvcBuildMap[oldServiceModule.ServiceName] = ""
 		}
 	}
 
-	for _, serviceName := range deleteServices.List() {
+	for _, newSvcModule := range currentBuild.Targets {
+		if !oldServiceModuleKey.Has(fmt.Sprintf("%s-%s-%s", newSvcModule.ProductName, newSvcModule.ServiceName, newSvcModule.ServiceModule)) {
+			modifiedSvcBuildMap[newSvcModule.ServiceName] = currentBuild.Name
+		}
+	}
+
+	for serviceName, buildName := range modifiedSvcBuildMap {
 		opt := &commonrepo.ServiceFindOption{
 			ServiceName:   serviceName,
 			Type:          setting.PMDeployType,
@@ -300,7 +338,7 @@ func updateCvmService(currentBuild, oldBuild *commonmodels.Build) error {
 			log.Errorf("failed to delete service %s, error: %s", resp.ServiceName, err)
 			return err
 		}
-		resp.BuildName = ""
+		resp.BuildName = buildName
 		if err := commonrepo.NewServiceColl().Create(resp); err != nil {
 			log.Errorf("failed to delete service %s, error: %s", resp.ServiceName, err)
 			return err

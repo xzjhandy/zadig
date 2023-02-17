@@ -24,64 +24,23 @@ import (
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/microservice/systemconfig/core/codehost/repository/mongodb"
+	"github.com/koderover/zadig/pkg/types"
 	steptypes "github.com/koderover/zadig/pkg/types/step"
 )
 
 type WorkflowV3 struct {
-	ID          string                   `json:"id"`
-	Name        string                   `json:"name"`
-	ProjectName string                   `json:"project_name"`
-	Description string                   `json:"description"`
-	Parameters  []*ParameterSetting      `json:"parameters"`
-	SubTasks    []map[string]interface{} `json:"sub_tasks"`
+	ID          string                    `json:"id"`
+	Name        string                    `json:"name"`
+	ProjectName string                    `json:"project_name"`
+	Description string                    `json:"description"`
+	Parameters  []*types.ParameterSetting `json:"parameters"`
+	SubTasks    []map[string]interface{}  `json:"sub_tasks"`
 }
 
 type WorkflowV3Brief struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	ProjectName string `json:"project_name"`
-}
-
-type ParameterSettingType string
-
-const (
-	StringType   ParameterSettingType = "string"
-	ChoiceType   ParameterSettingType = "choice"
-	ExternalType ParameterSettingType = "external"
-)
-
-type ParameterSetting struct {
-	// External type parameter will NOT use this key.
-	Key  string               `json:"key"`
-	Type ParameterSettingType `json:"type"`
-	//DefaultValue is the
-	DefaultValue string `json:"default_value"`
-	// choiceOption Are all options enumerated
-	ChoiceOption []string `json:"choice_option"`
-	// ExternalSetting It is the configuration of the external system to obtain the variable
-	ExternalSetting *ExternalSetting `json:"external_setting"`
-}
-
-type ExternalSetting struct {
-	SystemID string                  `json:"system_id"`
-	Endpoint string                  `json:"endpoint"`
-	Method   string                  `json:"method"`
-	Headers  []*KV                   `json:"headers"`
-	Body     string                  `json:"body"`
-	Params   []*ExternalParamMapping `json:"params"`
-}
-
-type KV struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
-
-type ExternalParamMapping struct {
-	// zadig变量名称
-	ParamKey string `json:"param_key"`
-	// 返回中的key的位置
-	ResponseKey string `json:"response_key"`
-	Display     bool   `json:"display"`
 }
 
 type WorkflowV3TaskArgs struct {
@@ -104,12 +63,49 @@ type CreateCustomTaskJobInput struct {
 	Parameters interface{}    `json:"parameters"`
 }
 
+type OpenAPICreateProductWorkflowTaskArgs struct {
+	WorkflowName string                     `json:"workflow_name"`
+	ProjectName  string                     `json:"project_name"`
+	Input        *CreateProductTaskJobInput `json:"input"`
+}
+
+func (c *OpenAPICreateProductWorkflowTaskArgs) Validate() (bool, error) {
+	if c.WorkflowName == "" {
+		return false, fmt.Errorf("workflow_name cannot be empty")
+	}
+	if c.ProjectName == "" {
+		return false, fmt.Errorf("project_name cannot be empty")
+	}
+
+	if c.Input == nil {
+		return false, fmt.Errorf("input cannot be empty")
+	}
+	return true, nil
+}
+
+type CreateProductTaskJobInput struct {
+	TargetEnv  string            `json:"target_env"`
+	BuildArgs  WorkflowBuildArg  `json:"build"`
+	DeployArgs WorkflowDeployArg `json:"deploy"`
+}
+
+type WorkflowBuildArg struct {
+	Enabled     bool                             `json:"enabled"`
+	ServiceList []*types.OpenAPIServiceBuildArgs `json:"service_list"`
+}
+
+type WorkflowDeployArg struct {
+	Enabled     bool                 `json:"enabled"`
+	Source      string               `json:"source"`
+	ServiceList []*ServiceDeployArgs `json:"service_list"`
+}
+
 type CustomJobInput interface {
 	UpdateJobSpec(job *commonmodels.Job) (*commonmodels.Job, error)
 }
 
 type PluginJobInput struct {
-	KVs []*KV `json:"kv"`
+	KVs []*types.KV `json:"kv"`
 }
 
 func (p *PluginJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.Job, error) {
@@ -134,8 +130,8 @@ func (p *PluginJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.Job
 }
 
 type FreestyleJobInput struct {
-	KVs      []*KV        `json:"kv"`
-	RepoInfo []*RepoInput `json:"repo_info"`
+	KVs      []*types.KV               `json:"kv"`
+	RepoInfo []*types.OpenAPIRepoInput `json:"repo_info"`
 }
 
 func (p *FreestyleJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.Job, error) {
@@ -187,24 +183,8 @@ func (p *FreestyleJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.
 }
 
 type ZadigBuildJobInput struct {
-	Registry    string              `json:"registry"`
-	ServiceList []*ServiceBuildArgs `json:"service_list"`
-}
-
-type ServiceBuildArgs struct {
-	ServiceModule string       `json:"service_module"`
-	ServiceName   string       `json:"service_name"`
-	RepoInfo      []*RepoInput `json:"repo_info"`
-	Inputs        []*KV        `json:"inputs"`
-}
-
-type RepoInput struct {
-	CodeHostName  string `json:"codehost_name"`
-	RepoNamespace string `json:"repo_namespace"`
-	RepoName      string `json:"repo_name"`
-	Branch        string `json:"branch"`
-	PR            int    `json:"pr"`
-	PRs           []int  `json:"prs"`
+	Registry    string                           `json:"registry"`
+	ServiceList []*types.OpenAPIServiceBuildArgs `json:"service_list"`
 }
 
 func (p *ZadigBuildJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.Job, error) {
@@ -408,9 +388,9 @@ type ZadigTestingJobInput struct {
 }
 
 type TestingArgs struct {
-	TestingName string       `json:"testing_name"`
-	RepoInfo    []*RepoInput `json:"repo_info"`
-	Inputs      []*KV        `json:"inputs"`
+	TestingName string                    `json:"testing_name"`
+	RepoInfo    []*types.OpenAPIRepoInput `json:"repo_info"`
+	Inputs      []*types.KV               `json:"inputs"`
 }
 
 func (p *ZadigTestingJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.Job, error) {
@@ -535,11 +515,11 @@ type K8sPatchJobInput struct {
 }
 
 type K8sPatchTarget struct {
-	ResourceName    string `json:"resource_name"`
-	ResourceKind    string `json:"resource_kind"`
-	ResourceGroup   string `json:"resource_group"`
-	ResourceVersion string `json:"resource_version"`
-	Inputs          []*KV  `json:"inputs"`
+	ResourceName    string      `json:"resource_name"`
+	ResourceKind    string      `json:"resource_kind"`
+	ResourceGroup   string      `json:"resource_group"`
+	ResourceVersion string      `json:"resource_version"`
+	Inputs          []*types.KV `json:"inputs"`
 }
 
 func (p *K8sPatchJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.Job, error) {
@@ -570,6 +550,51 @@ func (p *K8sPatchJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.J
 	}
 
 	newSpec.PatchItems = newItems
+
+	job.Spec = newSpec
+
+	return job, nil
+}
+
+type ZadigScanningJobInput struct {
+	ScanningList []*ScanningArg `json:"scanning_list"`
+}
+
+type ScanningArg struct {
+	ScanningName string                    `json:"scanning_name"`
+	RepoInfo     []*types.OpenAPIRepoInput `json:"repo_info"`
+}
+
+func (p *ZadigScanningJobInput) UpdateJobSpec(job *commonmodels.Job) (*commonmodels.Job, error) {
+	newSpec := new(commonmodels.ZadigScanningJobSpec)
+	if err := commonmodels.IToi(job.Spec, newSpec); err != nil {
+		return nil, errors.New("unable to cast job.Spec into commonmodels.ZadigScanningJobSpec")
+	}
+
+	for _, scanning := range newSpec.Scannings {
+		for _, inputScanning := range p.ScanningList {
+			// if the scanning name match, we do the update logic
+			if inputScanning.ScanningName == scanning.Name {
+				// update build repo info with input build info
+				for _, inputRepo := range inputScanning.RepoInfo {
+					repoInfo, err := mongodb.NewCodehostColl().GetCodeHostByAlias(inputRepo.CodeHostName)
+					if err != nil {
+						return nil, errors.New("failed to find code host with name:" + inputRepo.CodeHostName)
+					}
+
+					for _, buildRepo := range scanning.Repos {
+						if buildRepo.CodehostID == repoInfo.ID {
+							if buildRepo.RepoNamespace == inputRepo.RepoNamespace && buildRepo.RepoName == inputRepo.RepoName {
+								buildRepo.Branch = inputRepo.Branch
+								buildRepo.PR = inputRepo.PR
+								buildRepo.PRs = inputRepo.PRs
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	job.Spec = newSpec
 

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
@@ -83,7 +84,7 @@ func (j *CanaryDeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) 
 	kubeClient, err := kubeclient.GetKubeClient(config.HubServerAddress(), j.spec.ClusterID)
 	if err != nil {
 		logger.Errorf("Failed to get kube client, err: %v", err)
-		return resp, err
+		return resp, fmt.Errorf("failed to get kube client: %s, err: %v", j.spec.ClusterID, err)
 	}
 
 	for _, target := range j.spec.Targets {
@@ -94,7 +95,7 @@ func (j *CanaryDeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) 
 			return resp, errors.New(msg)
 		}
 		if service.Spec.ClusterIP == "None" {
-			msg := fmt.Sprintf("service :%s was a headless service, which canry deployment do not suppoort", err)
+			msg := fmt.Sprintf("service :%s was a headless service, which canry deployment do not support", err)
 			logger.Error(msg)
 			return resp, errors.New(msg)
 		}
@@ -121,6 +122,7 @@ func (j *CanaryDeployJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) 
 		canaryReplica := math.Ceil(float64(*deployment.Spec.Replicas) * (float64(target.CanaryPercentage) / 100))
 		task := &commonmodels.JobTask{
 			Name:    jobNameFormat(j.job.Name + "-" + target.K8sServiceName),
+			Key:     strings.Join([]string{j.job.Name, target.K8sServiceName}, "."),
 			JobType: string(config.JobK8sCanaryDeploy),
 			Spec: &commonmodels.JobTaskCanaryDeploySpec{
 				Namespace:        j.spec.Namespace,

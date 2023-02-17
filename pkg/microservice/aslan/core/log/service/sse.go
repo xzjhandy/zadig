@@ -36,8 +36,8 @@ import (
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	"github.com/koderover/zadig/pkg/tool/kube/containerlog"
 	"github.com/koderover/zadig/pkg/tool/kube/getter"
+	"github.com/koderover/zadig/pkg/tool/kube/label"
 	"github.com/koderover/zadig/pkg/tool/kube/watcher"
-	"github.com/koderover/zadig/pkg/util"
 )
 
 const (
@@ -157,12 +157,20 @@ func TaskContainerLogStream(ctx context.Context, streamChan chan interface{}, op
 			options.TaskID = taskObj.TaskID
 		}
 	} else if options.ProductName != "" {
+		workflowInfo, err := commonrepo.NewWorkflowColl().Find(options.PipelineName)
+		if err != nil {
+			log.Errorf("Failed to find product workflow of name: %s, error: %s", options.PipelineName, err)
+			return
+		}
+		var buildName string
+		for _, buildInfo := range workflowInfo.BuildStage.Modules {
+			if buildInfo.Target.ServiceName == serviceName && buildInfo.Target.ServiceModule == serviceModule {
+				buildName = buildInfo.Target.BuildName
+			}
+		}
 		buildFindOptions := &commonrepo.BuildFindOption{
 			ProductName: options.ProductName,
-			Targets:     []string{serviceModule},
-		}
-		if serviceName != "" {
-			buildFindOptions.ServiceName = serviceName
+			Name:        buildName,
 		}
 
 		build, err := commonrepo.NewBuildColl().Find(buildFindOptions)
@@ -181,15 +189,36 @@ func TaskContainerLogStream(ctx context.Context, streamChan chan interface{}, op
 				return
 			}
 		}
+		options.ClusterID = setting.LocalClusterID
+		options.Namespace = config.Namespace()
 		// Compatible with the situation where the old data has not been modified
 		if build != nil && build.PreBuild != nil && build.PreBuild.ClusterID != "" {
-			options.ClusterID = build.PreBuild.ClusterID
+			// since there are 2 cases in this situation: if no template is used, then we use the old logic
+			if build.TemplateID == "" {
+				options.ClusterID = build.PreBuild.ClusterID
 
-			switch build.PreBuild.ClusterID {
-			case setting.LocalClusterID:
-				options.Namespace = config.Namespace()
-			default:
-				options.Namespace = setting.AttachedClusterNamespace
+				switch build.PreBuild.ClusterID {
+				case setting.LocalClusterID:
+					options.Namespace = config.Namespace()
+				default:
+					options.Namespace = setting.AttachedClusterNamespace
+				}
+			} else {
+				// otherwise we have to get the template ID and find its cluster settings
+				template, err := commonrepo.NewBuildTemplateColl().Find(&commonrepo.BuildTemplateQueryOption{
+					ID: build.TemplateID,
+				})
+				if err != nil {
+					log.Errorf("failed to find build template of ID: [%s], error: [%s]", build.TemplateID, err)
+					return
+				}
+				options.ClusterID = template.PreBuild.ClusterID
+				switch template.PreBuild.ClusterID {
+				case setting.LocalClusterID:
+					options.Namespace = config.Namespace()
+				default:
+					options.Namespace = setting.AttachedClusterNamespace
+				}
 			}
 		}
 	}
@@ -197,7 +226,15 @@ func TaskContainerLogStream(ctx context.Context, streamChan chan interface{}, op
 	if options.SubTask == "" {
 		options.SubTask = string(config.TaskBuild)
 	}
-	selector := getPipelineSelector(options)
+	options.SubTask = strings.Replace(options.SubTask, "_", "-", -1)
+
+	selector := labels.Set(label.GetJobLabels(&label.JobLabel{
+		PipelineName: options.PipelineName,
+		TaskID:       options.TaskID,
+		TaskType:     options.SubTask,
+		ServiceName:  options.ServiceName,
+		PipelineType: options.PipelineType,
+	})).AsSelector()
 	waitAndGetLog(ctx, streamChan, selector, options, log)
 }
 
@@ -226,6 +263,8 @@ func WorkflowTaskV4ContainerLogStream(ctx context.Context, streamChan chan inter
 			case string(config.JobZadigTesting):
 				fallthrough
 			case string(config.JobZadigScanning):
+				fallthrough
+			case string(config.JobZadigDistributeImage):
 				fallthrough
 			case string(config.JobBuild):
 				jobSpec := &commonmodels.JobTaskFreestyleSpec{}
@@ -264,7 +303,13 @@ func WorkflowTaskV4ContainerLogStream(ctx context.Context, streamChan chan inter
 
 func TestJobContainerLogStream(ctx context.Context, streamChan chan interface{}, options *GetContainerOptions, log *zap.SugaredLogger) {
 	options.SubTask = string(config.TaskTestingV2)
-	selector := getPipelineSelector(options)
+	selector := labels.Set(label.GetJobLabels(&label.JobLabel{
+		PipelineName: options.PipelineName,
+		TaskID:       options.TaskID,
+		TaskType:     options.SubTask,
+		ServiceName:  options.ServiceName,
+		PipelineType: options.PipelineType,
+	})).AsSelector()
 	// get cluster ID
 	testing, _ := commonrepo.NewTestingColl().Find(getTestName(options.ServiceName), "")
 	// Compatible with the situation where the old data has not been modified
@@ -329,27 +374,6 @@ func waitAndGetLog(ctx context.Context, streamChan chan interface{}, selector la
 			log,
 		)
 	}
-}
-
-func getPipelineSelector(options *GetContainerOptions) labels.Selector {
-	ret := labels.Set{}
-	pipelineWithTaskID := fmt.Sprintf("%s-%d", strings.ToLower(options.PipelineName), options.TaskID)
-
-	//适配之前的docker_build下划线
-	options.SubTask = strings.Replace(options.SubTask, "_", "-", 1)
-
-	ret[setting.TaskLabel] = pipelineWithTaskID
-	ret[setting.TypeLabel] = options.SubTask
-
-	if options.ServiceName != "" {
-		ret[setting.ServiceLabel] = strings.ToLower(util.ReturnValidLabelValue(options.ServiceName))
-	}
-
-	if options.PipelineType != "" {
-		ret[setting.PipelineTypeLable] = options.PipelineType
-	}
-
-	return ret.AsSelector()
 }
 
 func getWorkflowSelector(options *GetContainerOptions) labels.Selector {

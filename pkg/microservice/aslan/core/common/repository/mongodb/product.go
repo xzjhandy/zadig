@@ -60,6 +60,8 @@ type ProductListOptions struct {
 	ShareEnvEnable  *bool
 	ShareEnvIsBase  *bool
 	ShareEnvBaseEnv *string
+
+	Production *bool
 }
 
 type projectEnvs struct {
@@ -252,6 +254,9 @@ func (c *ProductColl) List(opt *ProductListOptions) ([]*models.Product, error) {
 	if opt.ShareEnvBaseEnv != nil {
 		query["share_env.base_env"] = *opt.ShareEnvBaseEnv
 	}
+	if opt.Production != nil {
+		query["$or"] = []bson.M{{"production": bson.M{"$eq": false}}, {"production": bson.M{"$exists": false}}}
+	}
 
 	ctx := context.Background()
 	opts := options.Find()
@@ -365,7 +370,7 @@ func (c *ProductColl) Delete(owner, productName string) error {
 // Update  Cannot update owner & product name
 func (c *ProductColl) Update(args *models.Product) error {
 	query := bson.M{"env_name": args.EnvName, "product_name": args.ProductName}
-	change := bson.M{"$set": bson.M{
+	changePayload := bson.M{
 		"update_time": time.Now().Unix(),
 		"services":    args.Services,
 		"status":      args.Status,
@@ -373,10 +378,15 @@ func (c *ProductColl) Update(args *models.Product) error {
 		"render":      args.Render,
 		"error":       args.Error,
 		"share_env":   args.ShareEnv,
-	}}
-
+	}
+	if len(args.Source) > 0 {
+		changePayload["source"] = args.Source
+	}
+	if len(args.ServiceDeployStrategy) > 0 {
+		changePayload["service_deploy_strategy"] = args.ServiceDeployStrategy
+	}
+	change := bson.M{"$set": changePayload}
 	_, err := c.UpdateOne(context.TODO(), query, change)
-
 	return err
 }
 
@@ -394,6 +404,8 @@ func (c *ProductColl) Create(args *models.Product) error {
 	return err
 }
 
+// UpdateGroup TODO UpdateGroup needs to be optimized
+// Service info may be override when updating multiple services in same group at the sametime
 func (c *ProductColl) UpdateGroup(envName, productName string, groupIndex int, group []*models.ProductService) error {
 	serviceGroup := fmt.Sprintf("services.%d", groupIndex)
 	query := bson.M{
@@ -410,11 +422,37 @@ func (c *ProductColl) UpdateGroup(envName, productName string, groupIndex int, g
 	return err
 }
 
+func (c *ProductColl) UpdateDeployStrategy(envName, productName string, deployStrategy map[string]string) error {
+	query := bson.M{
+		"env_name":     envName,
+		"product_name": productName,
+	}
+	change := bson.M{
+		"update_time":             time.Now().Unix(),
+		"service_deploy_strategy": deployStrategy,
+	}
+
+	_, err := c.UpdateOne(context.TODO(), query, bson.M{"$set": change})
+
+	return err
+}
+
 func (c *ProductColl) UpdateProductRecycleDay(envName, productName string, recycleDay int) error {
 	query := bson.M{"env_name": envName, "product_name": productName}
 
 	change := bson.M{"$set": bson.M{
 		"recycle_day": recycleDay,
+	}}
+	_, err := c.UpdateOne(context.TODO(), query, change)
+
+	return err
+}
+
+func (c *ProductColl) UpdateProductAlias(envName, productName, alias string) error {
+	query := bson.M{"env_name": envName, "product_name": productName}
+
+	change := bson.M{"$set": bson.M{
+		"alias": alias,
 	}}
 	_, err := c.UpdateOne(context.TODO(), query, change)
 

@@ -36,6 +36,7 @@ import (
 	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
 	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/kube"
+	commonutil "github.com/koderover/zadig/pkg/microservice/aslan/core/common/util"
 	"github.com/koderover/zadig/pkg/setting"
 	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
 	e "github.com/koderover/zadig/pkg/tool/errors"
@@ -118,9 +119,9 @@ func getCreatorBySource(source string) IProductCreator {
 	switch source {
 	case setting.SourceFromExternal:
 		return newExternalProductCreator()
-	case setting.HelmDeployType:
+	case setting.SourceFromHelm:
 		return newHelmProductCreator()
-	case setting.PMDeployType:
+	case setting.SourceFromPM:
 		return newPMProductCreator()
 	default:
 		return newDefaultProductCreator()
@@ -195,13 +196,13 @@ func (creator *HelmProductCreator) Create(user, requestID string, args *models.P
 				Revision:    renderSet.Revision,
 			}
 			// user renderchart from renderset
-			chartInfoMap := make(map[string]*template.RenderChart)
+			chartInfoMap := make(map[string]*template.ServiceRender)
 			for _, renderChart := range renderSet.ChartInfos {
 				chartInfoMap[renderChart.ServiceName] = renderChart
 			}
 
 			// use values.yaml content from predefined env renderset
-			for _, singleRenderChart := range args.ChartInfos {
+			for _, singleRenderChart := range args.ServiceRenders {
 				if renderInEnvRenderset, ok := chartInfoMap[singleRenderChart.ServiceName]; ok {
 					singleRenderChart.OverrideValues = renderInEnvRenderset.OverrideValues
 					singleRenderChart.OverrideYaml = renderInEnvRenderset.OverrideYaml
@@ -215,7 +216,7 @@ func (creator *HelmProductCreator) Create(user, requestID string, args *models.P
 		return e.ErrCreateEnv.AddDesc(err.Error())
 	}
 
-	renderSet, err = FindHelmRenderSet(args.ProductName, args.Render.Name, args.EnvName, log)
+	renderSet, err = FindProductRenderSet(args.ProductName, args.Render.Name, args.EnvName, log)
 	if err != nil {
 		log.Errorf("[%s][P:%s] find product renderset error: %v", args.EnvName, args.ProductName, err)
 		return e.ErrCreateEnv.AddDesc(err.Error())
@@ -236,7 +237,6 @@ func (creator *HelmProductCreator) Create(user, requestID string, args *models.P
 	}
 
 	args.Render.Revision = renderSet.Revision
-	setServiceRender(args)
 	args.Status = setting.ProductStatusCreating
 	args.RecycleDay = config.DefaultRecycleDay()
 	args.ClusterID = clusterID
@@ -257,7 +257,7 @@ func (creator *HelmProductCreator) Create(user, requestID string, args *models.P
 		}
 	}
 
-	go installProductHelmCharts(user, args.EnvName, requestID, args, renderSet, time.Now().Unix(), helmClient, kubeClient, istioClient, log)
+	go installProductHelmCharts(user, requestID, args, renderSet, time.Now().Unix(), helmClient, kubeClient, istioClient, log)
 	return nil
 }
 
@@ -313,22 +313,25 @@ func (creator *PMProductCreator) Create(user, requestID string, args *models.Pro
 		return e.ErrCreateEnv.AddDesc(err.Error())
 	}
 	// 异步创建产品
-	go createGroups(args.EnvName, user, requestID, args, time.Now().Unix(), nil, nil, nil, nil, log)
+	go createGroups(user, requestID, args, time.Now().Unix(), nil, nil, nil, nil, log)
 	return nil
 }
 
-type DefaultProductCreator struct {
+type K8sYamlProductCreator struct {
 }
 
-func newDefaultProductCreator() *DefaultProductCreator {
-	return &DefaultProductCreator{}
+func newDefaultProductCreator() *K8sYamlProductCreator {
+	return &K8sYamlProductCreator{}
 }
 
 func dryRunServices(args *commonmodels.Product, renderSet *commonmodels.RenderSet, informer informers.SharedInformerFactory, kubeClient client.Client, log *zap.SugaredLogger) error {
 	errList := &multierror.Error{}
 	for _, group := range args.Services {
 		for _, svc := range group {
-			_, err := upsertService(false, args, svc, nil, renderSet, informer, kubeClient, nil, log)
+			if !commonutil.ServiceDeployed(svc.ServiceName, args.ServiceDeployStrategy) {
+				continue
+			}
+			_, err := upsertService(args, svc, nil, renderSet, args.Render, informer, kubeClient, nil, log)
 			if err != nil {
 				errList = multierror.Append(errList, fmt.Errorf("failed to dryRun apply service: %s, err: %s", svc.ServiceName, err))
 			}
@@ -337,7 +340,7 @@ func dryRunServices(args *commonmodels.Product, renderSet *commonmodels.RenderSe
 	return errList.ErrorOrNil()
 }
 
-func (creator *DefaultProductCreator) Create(user, requestID string, args *models.Product, log *zap.SugaredLogger) error {
+func (creator *K8sYamlProductCreator) Create(user, requestID string, args *models.Product, log *zap.SugaredLogger) error {
 	// get project cluster relation
 	clusterID := args.ClusterID
 	if clusterID == "" {
@@ -380,6 +383,41 @@ func (creator *DefaultProductCreator) Create(user, requestID string, args *model
 		args.Namespace = namespace
 	}
 
+	var renderSet *models.RenderSet
+	if args.Render == nil || args.Render.Revision == 0 {
+		renderSet, _, err = commonrepo.NewRenderSetColl().FindRenderSet(&commonrepo.RenderSetFindOption{
+			EnvName:     args.EnvName,
+			Name:        args.Namespace,
+			ProductTmpl: args.ProductName,
+		})
+
+		if err != nil {
+			log.Errorf("[%s][P:%s] find product renderset error: %v", args.EnvName, args.ProductName, err)
+			return e.ErrCreateEnv.AddDesc(err.Error())
+		}
+		// if env renderset is predefined, set render info
+		if renderSet != nil {
+			args.Render = &models.RenderInfo{
+				ProductTmpl: args.ProductName,
+				Name:        renderSet.Name,
+				Revision:    renderSet.Revision,
+			}
+			//// user renderchart from renderset
+			//chartInfoMap := make(map[string]*template.ServiceRender)
+			//for _, renderChart := range renderSet.ChartInfos {
+			//	chartInfoMap[renderChart.ServiceName] = renderChart
+			//}
+			//
+			//// use values.yaml content from predefined env renderset
+			//for _, singleRenderChart := range args.ServiceRenders {
+			//	if renderInEnvRenderset, ok := chartInfoMap[singleRenderChart.ServiceName]; ok {
+			//		singleRenderChart.OverrideValues = renderInEnvRenderset.OverrideValues
+			//		singleRenderChart.OverrideYaml = renderInEnvRenderset.OverrideYaml
+			//	}
+			//}
+		}
+	}
+
 	//创建角色环境之间的关联关系
 	//todo 创建环境暂时不指定角色
 	// 检查是否重复创建（TO BE FIXED）;检查k8s集群设置: Namespace/Secret .etc
@@ -388,26 +426,24 @@ func (creator *DefaultProductCreator) Create(user, requestID string, args *model
 		return e.ErrCreateEnv.AddDesc(err.Error())
 	}
 
-	if args.Render == nil {
-		args.Render = &models.RenderInfo{ProductTmpl: args.ProductName}
+	renderSet, _, err = commonrepo.NewRenderSetColl().FindRenderSet(&commonrepo.RenderSetFindOption{
+		EnvName:  args.EnvName,
+		Name:     args.Render.Name,
+		Revision: args.Render.Revision,
+	})
+	if err != nil {
+		return e.ErrCreateEnv.AddErr(fmt.Errorf("failed to find renderset: %v/%v", args.Render.Name, args.Render.Revision))
 	}
-
-	renderSet := &models.RenderSet{
-		ProductTmpl: args.Render.ProductTmpl,
-		Name:        args.Render.Name,
-		Revision:    args.Render.Revision,
-	}
-	// 如果是版本回滚，则args.Render.Revision > 0
-	if args.Render.Revision == 0 {
-		// 检查renderset是否覆盖产品所有key
-		renderSet, err = commonservice.ValidateRenderSet(args.ProductName, args.Render.Name, args.EnvName, nil, log)
-		if err != nil {
-			log.Errorf("[%s][P:%s] validate product renderset error: %v", args.EnvName, args.ProductName, err)
-			return e.ErrCreateEnv.AddDesc(err.Error())
-		}
-		args.Render.Revision = renderSet.Revision
-		setServiceRender(args)
-	}
+	//// 如果是版本回滚，则args.Render.Revision > 0
+	//if args.Render.Revision == 0 {
+	//	// 检查renderset是否覆盖产品所有key
+	//	renderSet, err = commonservice.ValidateRenderSet(args.ProductName, args.Render.Name, args.EnvName, nil, log)
+	//	if err != nil {
+	//		log.Errorf("[%s][P:%s] validate product renderset error: %v", args.EnvName, args.ProductName, err)
+	//		return e.ErrCreateEnv.AddDesc(err.Error())
+	//	}
+	//	args.Render.Revision = renderSet.Revision
+	//}
 
 	// before we apply yaml to k8s, we run kubectl apply --dry-run to expose problems early
 	dryRunClient := client.NewDryRunClient(kubeClient)
@@ -430,7 +466,7 @@ func (creator *DefaultProductCreator) Create(user, requestID string, args *model
 		return e.ErrCreateEnv.AddDesc(err.Error())
 	}
 
-	go createGroups(args.EnvName, user, requestID, args, time.Now().Unix(), renderSet, inf, kubeClient, istioClient, log)
+	go createGroups(user, requestID, args, time.Now().Unix(), renderSet, inf, kubeClient, istioClient, log)
 	return nil
 }
 

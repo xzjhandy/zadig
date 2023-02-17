@@ -390,14 +390,16 @@ func (r *Reaper) Exec() (err error) {
 	}
 	log.Infof("Execution ended. Duration: %.2f seconds.", time.Since(startTimeRunBuildScript).Seconds())
 
-	// for sonar type we write the sonar parameter into config file and go with sonar-scanner command
-	log.Info("Executing SonarQube Scanning process.")
-	startTimeRunSonar := time.Now()
-	if err = r.runSonarScanner(); err != nil {
-		err = fmt.Errorf("failed to execute sonar scanning process, the error is: %s", err)
-		return
+	if r.Ctx.ScannerFlag && r.Ctx.ScannerType == types.ScanningTypeSonar {
+		// for sonar type we write the sonar parameter into config file and go with sonar-scanner command
+		log.Info("Executing SonarQube Scanning process.")
+		startTimeRunSonar := time.Now()
+		if err = r.runSonarScanner(); err != nil {
+			err = fmt.Errorf("failed to execute sonar scanning process, the error is: %s", err)
+			return
+		}
+		log.Infof("Sonar scan ended. Duration %.2f seconds.", time.Since(startTimeRunSonar).Seconds())
 	}
-	log.Infof("Sonar scan ended. Duration %.2f seconds.", time.Since(startTimeRunSonar).Seconds())
 
 	err = r.runDockerBuild()
 	return
@@ -504,7 +506,7 @@ func (r *Reaper) AfterExec() error {
 		if r.Ctx.UploadStorageInfo.Provider == setting.ProviderSourceAli {
 			forcedPathStyle = false
 		}
-		client, err := s3.NewClient(r.Ctx.UploadStorageInfo.Endpoint, r.Ctx.UploadStorageInfo.AK, r.Ctx.UploadStorageInfo.SK, r.Ctx.UploadStorageInfo.Insecure, forcedPathStyle)
+		client, err := s3.NewClient(r.Ctx.UploadStorageInfo.Endpoint, r.Ctx.UploadStorageInfo.AK, r.Ctx.UploadStorageInfo.SK, r.Ctx.UploadStorageInfo.Region, r.Ctx.UploadStorageInfo.Insecure, forcedPathStyle)
 		if err != nil {
 			return fmt.Errorf("failed to create s3 client to upload file, err: %s", err)
 		}

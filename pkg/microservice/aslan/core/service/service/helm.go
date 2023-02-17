@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/27149chen/afero"
+	"github.com/koderover/zadig/pkg/microservice/aslan/core/common/service/command"
 	"github.com/otiai10/copy"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -380,7 +381,7 @@ func EditFileContent(serviceName, productName, createdBy, requestID string, para
 		return e.ErrEditHelmCharts.AddErr(fmt.Errorf("failed to create service %s in project %s, error: %s", serviceName, productName, err))
 	}
 
-	compareHelmVariable([]*templatemodels.RenderChart{
+	compareHelmVariable([]*templatemodels.ServiceRender{
 		{
 			ServiceName:  svc.ServiceName,
 			ChartVersion: svc.HelmChart.Version,
@@ -501,9 +502,7 @@ func CreateOrUpdateHelmService(projectName string, args *HelmServiceCreationArgs
 		return CreateOrUpdateHelmServiceFromGitRepo(projectName, args, force, logger)
 	case LoadFromChartTemplate:
 		return CreateOrUpdateHelmServiceFromChartTemplate(projectName, args, force, logger)
-	case LoadFromGerrit, setting.SourceFromGitee:
-		return CreateOrUpdateHelmServiceFromRepo(projectName, args, force, logger)
-	case setting.SourceFromGiteeEE:
+	case LoadFromGerrit, setting.SourceFromGitee, setting.SourceFromGiteeEE:
 		return CreateOrUpdateHelmServiceFromRepo(projectName, args, force, logger)
 	case LoadFromChartRepo:
 		return CreateOrUpdateHelmServiceFromChartRepo(projectName, args, force, logger)
@@ -599,7 +598,7 @@ func CreateOrUpdateHelmServiceFromChartRepo(projectName string, args *HelmServic
 		return nil, finalErr
 	}
 
-	compareHelmVariable([]*templatemodels.RenderChart{
+	compareHelmVariable([]*templatemodels.ServiceRender{
 		{
 			ServiceName:  chartRepoArgs.ChartName,
 			ChartVersion: svc.HelmChart.Version,
@@ -733,7 +732,7 @@ func createOrUpdateHelmServiceFromChartTemplate(templateArgs *CreateFromChartTem
 		return nil, err
 	}
 
-	compareHelmVariable([]*templatemodels.RenderChart{
+	compareHelmVariable([]*templatemodels.ServiceRender{
 		{
 			ServiceName:  args.Name,
 			ChartVersion: svc.HelmChart.Version,
@@ -781,9 +780,25 @@ func CreateOrUpdateHelmServiceFromRepo(projectName string, args *HelmServiceCrea
 		return nil, jsonResErr
 	}
 
+	// if the repo type is other, we download the chart
+	codehostDetail, err := systemconfig.New().GetCodeHost(createFromRepo.CodehostID)
+	if err != nil {
+		log.Errorf("failed to get codehost detail to pull the repo, error: %s", err)
+		return nil, err
+	}
+
+	if codehostDetail.Type == setting.SourceFromOther {
+		err = command.RunGitCmds(codehostDetail, createFromRepo.Owner, createFromRepo.Namespace, createFromRepo.Repo, createFromRepo.Branch, "origin")
+		if err != nil {
+			log.Errorf("Failed to clone the repo, namespace: [%s], name: [%s], branch: [%s], error: %s", createFromRepo.Namespace, createFromRepo.Repo, createFromRepo.Branch, err)
+			return nil, err
+		}
+	}
+
 	filePaths = createFromRepo.Paths
 	base = path.Join(config.S3StoragePath(), createFromRepo.Repo)
-	helmRenderCharts := make([]*templatemodels.RenderChart, 0, len(filePaths))
+
+	helmRenderCharts := make([]*templatemodels.ServiceRender, 0, len(filePaths))
 	var wg wait.Group
 	var mux sync.RWMutex
 	var serviceList []*commonmodels.Service
@@ -910,7 +925,7 @@ func CreateOrUpdateHelmServiceFromRepo(projectName string, args *HelmServiceCrea
 			}
 			serviceList = append(serviceList, svc)
 
-			helmRenderCharts = append(helmRenderCharts, &templatemodels.RenderChart{
+			helmRenderCharts = append(helmRenderCharts, &templatemodels.ServiceRender{
 				ServiceName:  serviceName,
 				ChartVersion: svc.HelmChart.Version,
 				ValuesYaml:   svc.HelmChart.ValuesYaml,
@@ -949,8 +964,11 @@ func CreateOrUpdateHelmServiceFromGitRepo(projectName string, args *HelmServiceC
 		log.Errorf("Failed to get source form repo data %+v, err: %s", *repoArgs, err.Error())
 		return nil, err
 	}
+	if source == setting.SourceFromOther {
+		return CreateOrUpdateHelmServiceFromRepo(projectName, args, force, log)
+	}
 
-	helmRenderCharts := make([]*templatemodels.RenderChart, 0, len(repoArgs.Paths))
+	helmRenderCharts := make([]*templatemodels.ServiceRender, 0, len(repoArgs.Paths))
 
 	var wg wait.Group
 	var mux sync.RWMutex
@@ -1059,7 +1077,7 @@ func CreateOrUpdateHelmServiceFromGitRepo(projectName string, args *HelmServiceC
 			}
 			serviceList = append(serviceList, svc)
 
-			helmRenderCharts = append(helmRenderCharts, &templatemodels.RenderChart{
+			helmRenderCharts = append(helmRenderCharts, &templatemodels.ServiceRender{
 				ServiceName:  serviceName,
 				ChartVersion: svc.HelmChart.Version,
 				ValuesYaml:   svc.HelmChart.ValuesYaml,
@@ -1131,11 +1149,11 @@ func CreateOrUpdateBulkHelmServiceFromTemplate(projectName string, args *BulkHel
 		FailedServices:  make([]*FailedService, 0),
 	}
 
-	renderChars := make([]*templatemodels.RenderChart, 0)
+	renderChars := make([]*templatemodels.ServiceRender, 0)
 
 	renderChartMap.Range(func(key, value interface{}) bool {
 		resp.SuccessServices = append(resp.SuccessServices, key.(string))
-		renderChars = append(renderChars, value.(*templatemodels.RenderChart))
+		renderChars = append(renderChars, value.(*templatemodels.ServiceRender))
 		return true
 	})
 	svcMap.Range(func(key, value interface{}) bool {
@@ -1156,7 +1174,7 @@ func CreateOrUpdateBulkHelmServiceFromTemplate(projectName string, args *BulkHel
 }
 
 func handleSingleService(projectName string, repoConfig *commonservice.RepoConfig, path, fromPath string, args *BulkHelmServiceCreationArgs,
-	templateChartData *ChartTemplateData, force bool, logger *zap.SugaredLogger) (*templatemodels.RenderChart, *commonmodels.Service, error) {
+	templateChartData *ChartTemplateData, force bool, logger *zap.SugaredLogger) (*templatemodels.ServiceRender, *commonmodels.Service, error) {
 	valuesYAML, err := fsservice.DownloadFileFromSource(&fsservice.DownloadFromSourceArgs{
 		CodehostID: repoConfig.CodehostID,
 		Owner:      repoConfig.Owner,
@@ -1256,7 +1274,7 @@ func handleSingleService(projectName string, repoConfig *commonservice.RepoConfi
 		return nil, nil, err
 	}
 
-	return &templatemodels.RenderChart{
+	return &templatemodels.ServiceRender{
 		ServiceName:  serviceName,
 		ChartVersion: templateChartData.ChartVersion,
 		ValuesYaml:   string(mergedValues),
@@ -1318,7 +1336,9 @@ func geneCreationDetail(args *helmServiceCreationArgs) interface{} {
 		setting.SourceFromGerrit,
 		setting.SourceFromGitee,
 		setting.SourceFromGiteeEE,
-		setting.SourceFromCodeHub:
+		setting.SourceFromCodeHub,
+		// FIXME this is a temporary solution, remove when possible
+		setting.SourceFromGitRepo:
 		return &models.CreateFromRepo{
 			GitRepoConfig: &templatemodels.GitRepoConfig{
 				CodehostID: args.CodehostID,
@@ -1409,11 +1429,24 @@ func createOrUpdateHelmService(fsTree fs.FS, args *helmServiceCreationArgs, forc
 		chartName, chartVersion string
 		err                     error
 	)
-	switch args.Source {
+	// FIXME: use a temporary source, make sure it is correct next time
+	tempSource := args.Source
+	if args.Source == setting.SourceFromGitRepo {
+		ch, err := systemconfig.New().GetCodeHost(args.CodehostID)
+		if err != nil {
+			log.Errorf("failed to get codehost detail, err: %s", err)
+			return nil, err
+		}
+		if ch.Type == setting.SourceFromOther {
+			tempSource = setting.SourceFromOther
+		}
+	}
+
+	switch tempSource {
 	case string(LoadFromGerrit):
 		base := path.Join(config.S3StoragePath(), args.GerritRepoName)
 		chartName, chartVersion, err = readChartYAMLFromLocal(filepath.Join(base, args.FilePath), logger)
-	case setting.SourceFromGitee, setting.SourceFromGiteeEE:
+	case setting.SourceFromGitee, setting.SourceFromGiteeEE, setting.SourceFromOther:
 		base := path.Join(config.S3StoragePath(), args.Repo)
 		chartName, chartVersion, err = readChartYAMLFromLocal(filepath.Join(base, args.FilePath), logger)
 	default:
@@ -1517,6 +1550,9 @@ func createOrUpdateHelmService(fsTree fs.FS, args *helmServiceCreationArgs, forc
 			log.Errorf("Failed to create gerrit webhook, err: %s", err)
 			return nil, err
 		}
+	case setting.SourceFromOther:
+		// no webhook is required
+		break
 	default:
 		commonservice.ProcessServiceWebhook(serviceObj, currentSvcTmpl, args.ServiceName, logger)
 	}
@@ -1586,20 +1622,20 @@ func loadServiceFileInfos(productName, serviceName string, revision int64, dir s
 }
 
 // compareHelmVariable 比较helm变量是否有改动，是否需要添加新的renderSet
-func compareHelmVariable(chartInfos []*templatemodels.RenderChart, productName, createdBy string, log *zap.SugaredLogger) {
+func compareHelmVariable(chartInfos []*templatemodels.ServiceRender, productName, createdBy string, log *zap.SugaredLogger) {
 	// 对比上个版本的renderset，新增一个版本
-	latestChartInfos := make([]*templatemodels.RenderChart, 0)
+	latestChartInfos := make([]*templatemodels.ServiceRender, 0)
 	renderOpt := &commonrepo.RenderSetFindOption{Name: productName, ProductTmpl: productName, IsDefault: true}
 	if latestDefaultRenderSet, err := commonrepo.NewRenderSetColl().Find(renderOpt); err == nil {
 		latestChartInfos = latestDefaultRenderSet.ChartInfos
 	}
 
-	currentChartInfoMap := make(map[string]*templatemodels.RenderChart)
+	currentChartInfoMap := make(map[string]*templatemodels.ServiceRender)
 	for _, chartInfo := range chartInfos {
 		currentChartInfoMap[chartInfo.ServiceName] = chartInfo
 	}
 
-	mixtureChartInfos := make([]*templatemodels.RenderChart, 0)
+	mixtureChartInfos := make([]*templatemodels.ServiceRender, 0)
 	for _, latestChartInfo := range latestChartInfos {
 		//如果新的里面存在就拿新的数据替换，不存在就还使用老的数据
 		if currentChartInfo, isExist := currentChartInfoMap[latestChartInfo.ServiceName]; isExist {
@@ -1616,7 +1652,7 @@ func compareHelmVariable(chartInfos []*templatemodels.RenderChart, productName, 
 	}
 
 	//添加renderset
-	if err := commonservice.CreateHelmRenderSet(
+	if err := commonservice.CreateK8sHelmRenderSet(
 		&models.RenderSet{
 			Name:        productName,
 			Revision:    0,
@@ -1625,6 +1661,20 @@ func compareHelmVariable(chartInfos []*templatemodels.RenderChart, productName, 
 			ChartInfos:  mixtureChartInfos,
 		}, log,
 	); err != nil {
-		log.Errorf("helmService.Create CreateHelmRenderSet error: %v", err)
+		log.Errorf("helmService.Create CreateK8sHelmRenderSet error: %v", err)
 	}
+
+	newRenderset := &models.RenderSet{
+		Name:        productName,
+		ProductTmpl: productName,
+		UpdateBy:    createdBy,
+		ChartInfos:  mixtureChartInfos,
+		IsDefault:   true,
+	}
+
+	if err := commonservice.CreateDefaultHelmRenderset(newRenderset, log); err != nil {
+		log.Error(fmt.Errorf("failed to create renderset, name: %s, err: %s", newRenderset.Name, err))
+		return
+	}
+
 }

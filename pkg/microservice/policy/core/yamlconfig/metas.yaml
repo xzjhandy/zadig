@@ -237,6 +237,16 @@ metas:
         rules:
           - method: DELETE
             endpoint: /api/aslan/build/build
+  - resource: ReleaseCenter
+    alias: 发布中心
+    description: ''
+    rules:
+      - action: get_release
+        alias: 查看
+        description: ''
+        rules:
+          - method: GET
+            endpoint: /api/v1/policy/permission/releaseworkflow
   - resource: TestCenter
     alias: 测试中心
     description: ''
@@ -246,47 +256,7 @@ metas:
         description: ''
         rules:
           - method: GET
-            endpoint: /api/aslan/workflow/sse/workflows/id/?*/pipelines/?*
-          - method: GET
-            endpoint: /api/aslan/testing/test
-          - method: GET
-            endpoint: /api/aslan/testing/test/?*
-          - method: GET
-            endpoint: /api/aslan/testing/testdetail
-          - method: GET
-            endpoint: /api/aslan/workflow/workflow/testName/?*
-          - method: GET
-            endpoint: /api/aslan/workflow/v2/tasks/workflow/workflow/?*/taskId/?*
-          - method: GET
-            endpoint: /api/aslan/testing/workspace/workflow/?*/taskId/?*
-      - action: edit_test
-        alias: 编辑
-        description: ''
-        rules:
-          - method: PUT
-            endpoint: /api/aslan/testing/test
-          - method: GET
-            endpoint: /api/aslan/cluster/clusters
-      - action: delete_test
-        alias: 删除
-        description: ''
-        rules:
-          - method: DELETE
-            endpoint: /api/aslan/testing/test/?*
-      - action: create_test
-        alias: 新建
-        description: ''
-        rules:
-          - method: POST
-            endpoint: /api/aslan/testing/test
-          - method: GET
-            endpoint: /api/aslan/cluster/clusters
-      - action: run_test
-        alias: 执行
-        description: ''
-        rules:
-          - method: POST
-            endpoint: /api/aslan/testing/testtask
+            endpoint: /api/v1/policy/permission/testing
   - resource: DataCenter
     alias: 数据视图
     description: ''
@@ -344,7 +314,7 @@ metas:
           - method: POST
             endpoint: api/aslan/stat/quality/testTrend
   - resource: Template
-    alias: 模版库
+    alias: 模板库
     description: ''
     rules:
       - action: create_template
@@ -359,6 +329,14 @@ metas:
             endpoint: /api/aslan/template/yaml
           - method: POST
             endpoint: /api/aslan/template/build
+          - method: POST
+            endpoint: /api/aslan/template/workflow
+          - method: GET
+            endpoint: /api/aslan/system/lark/?*/department/?*
+          - method: GET
+            endpoint: /api/aslan/system/lark/?*/user
+          - method: GET
+            endpoint: /api/aslan/system/im_app
       - action: get_template
         alias: 查看
         description: 查看
@@ -377,6 +355,10 @@ metas:
             endpoint: /api/aslan/template/build
           - method: GET
             endpoint: /api/aslan/template/build/?*
+          - method: GET
+            endpoint: /api/aslan/template/workflow
+          - method: GET
+            endpoint: /api/aslan/template/workflow/?*
       - action: edit_template
         alias: 编辑
         description: 编辑
@@ -399,6 +381,14 @@ metas:
             endpoint: /api/aslan/template/build/?*
           - method: POST
             endpoint: /api/aslan/template/yaml/validateVariable
+          - method: PUT
+            endpoint: /api/aslan/template/workflow
+          - method: GET
+            endpoint: /api/aslan/system/lark/?*/department/?*
+          - method: GET
+            endpoint: /api/aslan/system/lark/?*/user
+          - method: GET
+            endpoint: /api/aslan/system/im_app
       - action: delete_template
         alias: 删除
         description: 删除
@@ -411,6 +401,8 @@ metas:
             endpoint: /api/aslan/template/dockerfile/?*
           - method: DELETE
             endpoint: /api/aslan/template/build/?*
+          - method: DELETE
+            endpoint: /api/aslan/template/workflow/?*
   - resource: DeliveryCenter
     alias: 交付中心
     description: ''
@@ -535,6 +527,12 @@ metas:
             endpoint: /api/aslan/workflow/v4/cron
           - method: DELETE
             endpoint: /api/aslan/workflow/v4/cron/?*/trigger/?*
+          - method: GET
+            endpoint: /api/aslan/system/lark/?*/department/?*
+          - method: GET
+            endpoint: /api/aslan/system/lark/?*/user
+          - method: GET
+            endpoint: /api/aslan/system/im_app
       - action: create_workflow
         alias: 新建
         description: ''
@@ -559,6 +557,10 @@ metas:
             endpoint: /api/aslan/workflow/v4
           - method: POST
             endpoint: /api/aslan/workflow/v4/lint
+          - method: GET
+            endpoint: /api/aslan/template/workflow
+          - method: GET
+            endpoint: /api/aslan/template/workflow/?*
       - action: delete_workflow
         alias: 删除
         description: ''
@@ -706,6 +708,8 @@ metas:
           - method: PUT
             endpoint: '/api/aslan/environment/environments/:name/envRecycle'
           - method: PUT
+            endpoint: '/api/aslan/environment/environments/:name/alias'
+          - method: PUT
             endpoint: '/api/aslan/environment/environments/:name/renderset'
           - method: PUT
             endpoint: /api/aslan/service/workloads
@@ -731,8 +735,6 @@ metas:
             endpoint: '/api/aslan/environment/environments/:name/services/?*/restart'
           - method: POST
             endpoint: '/api/aslan/environment/environments/:name/services/?*/restartNew'
-          - method: POST
-            endpoint: '/api/aslan/environment/environments/:name/services/?*/scale'
           - method: POST
             endpoint: '/api/aslan/environment/environments/:name/services/?*/scaleNew'
           - method: PUT

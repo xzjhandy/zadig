@@ -245,6 +245,78 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		sonar.DELETE("/integration/:id", DeleteSonarIntegration)
 		sonar.POST("/validate", ValidateSonarInformation)
 	}
+
+	// ---------------------------------------------------------------------------------------
+	// configuration management integration API
+	// ---------------------------------------------------------------------------------------
+	configuration := router.Group("configuration")
+	{
+		configuration.GET("", ListConfigurationManagement)
+		configuration.POST("", CreateConfigurationManagement)
+		configuration.PUT("/:id", UpdateConfigurationManagement)
+		configuration.GET("/:id", GetConfigurationManagement)
+		configuration.DELETE("/:id", DeleteConfigurationManagement)
+		configuration.POST("/validate", ValidateConfigurationManagement)
+		configuration.GET("/apollo", ValidateConfigurationManagement)
+	}
+
+	imapp := router.Group("im_app")
+	{
+		imapp.GET("", ListIMApp)
+		imapp.POST("", CreateIMApp)
+		imapp.PUT("/:id", UpdateIMApp)
+		imapp.DELETE("/:id", DeleteIMApp)
+		imapp.POST("/validate", ValidateIMApp)
+	}
+
+	lark := router.Group("lark")
+	{
+		lark.GET("/:id/department/:department_id", GetLarkDepartment)
+		lark.GET("/:id/user", GetLarkUserID)
+		lark.POST("/:id/webhook", LarkEventHandler)
+	}
+
+	pm := router.Group("project_management")
+	{
+		pm.GET("", ListProjectManagement)
+		pm.POST("", CreateProjectManagement)
+		pm.POST("/validate", Validate)
+		pm.PATCH("/:id", UpdateProjectManagement)
+		pm.DELETE("/:id", DeleteProjectManagement)
+		pm.GET("/jira/project", ListJiraProjects)
+		pm.GET("/jira/issue", SearchJiraIssues)
+		pm.GET("/jira/type", GetJiraTypes)
+		pm.POST("/jira/webhook/:workflowName/:hookName", HandleJiraEvent)
+		pm.POST("/meego/webhook/:workflowName/:hookName", HandleMeegoEvent)
+	}
+	// personal dashboard configuration
+	dashboard := router.Group("dashboard")
+	{
+		// dashboard configuration
+		dashboard.GET("/settings", GetDashboardConfiguration)
+		dashboard.PUT("/settings", CreateOrUpdateDashboardConfiguration)
+
+		// dashboard card API
+		dashboard.GET("/workflow/running", GetRunningWorkflow)
+		dashboard.GET("/workflow/mine", GetMyWorkflow)
+		dashboard.GET("/environment/:name", GetMyEnvironment)
+	}
+
+	// get nacos info
+	nacos := router.Group("nacos")
+	{
+		nacos.GET("/:nacosID", ListNacosNamespace)
+		nacos.GET("/:nacosID/namespace/:nacosNamespaceID", ListNacosConfig)
+	}
+
+	// feishu project management module
+	meego := router.Group("meego")
+	{
+		meego.GET("/projects", GetMeegoProjects)
+		meego.GET("/projects/:projectID/work_item/types", GetWorkItemTypeList)
+		meego.GET("/projects/:projectID/work_item", ListMeegoWorkItems)
+		meego.GET("/projects/:projectID/work_item/:workItemID/transitions", ListAvailableWorkItemTransitions)
+	}
 }
 
 type OpenAPIRouter struct{}

@@ -182,6 +182,19 @@ func (h *TaskAckHandler) handle(message *nsq.Message) error {
 				h.log.Errorf("createVersion err: %v", err)
 			}
 		}()
+
+		go func() {
+			// update history tasks status to archive
+			result, err := commonrepo.NewStrategyColl().GetByTarget(commonmodels.WorkflowTaskRetention)
+			if err != nil {
+				h.log.Errorf("get workflow task retention strategy error: %s", err)
+				result = commonmodels.DefaultWorkflowTaskRetention
+			}
+
+			if err = h.ptColl.ArchiveHistoryPipelineTask(pt.PipelineName, pt.Type, result.Retention.MaxItems, result.Retention.MaxDays); err != nil {
+				h.log.Errorf("ArchiveHistoryPipelineTask error: %v", err)
+			}
+		}()
 	}
 
 	// 更新数据库 product
@@ -207,16 +220,6 @@ func (h *TaskAckHandler) handle(message *nsq.Message) error {
 				h.log.Infof("succeed to update container image %v", deploy)
 			}
 		}
-	}
-
-	// update history tasks status to archive
-	result, err := commonrepo.NewStrategyColl().GetByTarget(commonmodels.WorkflowTaskRetention)
-	if err != nil {
-		h.log.Errorf("get workflow task retention strategy error: %s", err)
-		result = commonmodels.DefaultWorkflowTaskRetention
-	}
-	if err = h.ptColl.ArchiveHistoryPipelineTask(pt.PipelineName, pt.Type, result.Retention.MaxItems, result.Retention.MaxDays); err != nil {
-		h.log.Errorf("ArchiveHistoryPipelineTask error: %v", err)
 	}
 
 	return nil
@@ -482,7 +485,7 @@ func (h *TaskAckHandler) uploadTaskData(pt *task.Task) error {
 								if storage.Provider == setting.ProviderSourceAli {
 									forcedPathStyle = false
 								}
-								client, err := s3tool.NewClient(storage.Endpoint, storage.Ak, storage.Sk, storage.Insecure, forcedPathStyle)
+								client, err := s3tool.NewClient(storage.Endpoint, storage.Ak, storage.Sk, storage.Region, storage.Insecure, forcedPathStyle)
 								objectKey := storage.GetObjectPath(fileSrc)
 								err = client.Download(storage.Bucket, objectKey, filename)
 								if err != nil {
@@ -656,7 +659,7 @@ func (h *TaskAckHandler) uploadTaskData(pt *task.Task) error {
 							if storage.Provider == setting.ProviderSourceAli {
 								forcedPathStyle = false
 							}
-							client, err := s3tool.NewClient(storage.Endpoint, storage.Ak, storage.Sk, storage.Insecure, forcedPathStyle)
+							client, err := s3tool.NewClient(storage.Endpoint, storage.Ak, storage.Sk, storage.Region, storage.Insecure, forcedPathStyle)
 							objectKey := storage.GetObjectPath(fileSrc)
 							err = client.Download(storage.Bucket, objectKey, filename)
 							if err != nil {

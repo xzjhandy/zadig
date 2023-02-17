@@ -27,8 +27,10 @@ import (
 	commonservice "github.com/koderover/zadig/pkg/microservice/aslan/core/common/service"
 	"github.com/koderover/zadig/pkg/setting"
 	"github.com/koderover/zadig/pkg/tool/log"
+	"github.com/koderover/zadig/pkg/tool/sonar"
 	"github.com/koderover/zadig/pkg/types"
 	"github.com/koderover/zadig/pkg/types/step"
+	"go.uber.org/zap"
 )
 
 type ScanningJob struct {
@@ -150,9 +152,11 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 		jobTaskSpec := &commonmodels.JobTaskFreestyleSpec{}
 		jobTask := &commonmodels.JobTask{
 			Name:    jobNameFormat(scanning.Name + "-" + j.job.Name),
+			Key:     strings.Join([]string{j.job.Name, scanning.Name}, "."),
 			JobType: string(config.JobZadigScanning),
 			Spec:    jobTaskSpec,
 			Timeout: timeout,
+			Outputs: scanningInfo.Outputs,
 		}
 		scanningNameKV := &commonmodels.KeyVal{
 			Key:   "SCANNING_NAME",
@@ -163,14 +167,15 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			scanningImage = strings.ReplaceAll(config.ReaperImage(), "${BuildOS}", basicImage.Value)
 		}
 		jobTaskSpec.Properties = commonmodels.JobProperties{
-			Timeout:         timeout,
-			ResourceRequest: scanningInfo.AdvancedSetting.ResReq,
-			ResReqSpec:      scanningInfo.AdvancedSetting.ResReqSpec,
-			ClusterID:       scanningInfo.AdvancedSetting.ClusterID,
-			BuildOS:         scanningImage,
-			ImageFrom:       setting.ImageFromCustom,
-			Envs:            []*commonmodels.KeyVal{scanningNameKV},
-			Registries:      registries,
+			Timeout:             timeout,
+			ResourceRequest:     scanningInfo.AdvancedSetting.ResReq,
+			ResReqSpec:          scanningInfo.AdvancedSetting.ResReqSpec,
+			ClusterID:           scanningInfo.AdvancedSetting.ClusterID,
+			BuildOS:             scanningImage,
+			ImageFrom:           setting.ImageFromCustom,
+			Envs:                []*commonmodels.KeyVal{scanningNameKV},
+			Registries:          registries,
+			ShareStorageDetails: getShareStorageDetail(j.workflow.ShareStorages, scanning.ShareStorageInfo, j.workflow.Name, taskID),
 		}
 
 		// init tools install step
@@ -193,7 +198,7 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 			Name:     scanning.Name + "-git",
 			JobName:  jobTask.Name,
 			StepType: config.StepGit,
-			Spec:     step.StepGitSpec{Repos: renderRepos(scanning.Repos, scanningInfo.Repos)},
+			Spec:     step.StepGitSpec{Repos: renderRepos(scanning.Repos, scanningInfo.Repos, jobTaskSpec.Properties.Envs)},
 		}
 		jobTaskSpec.Steps = append(jobTaskSpec.Steps, gitStep)
 		repoName := ""
@@ -209,7 +214,7 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				JobName:  jobTask.Name,
 				StepType: config.StepShell,
 				Spec: &step.StepShellSpec{
-					Scripts:     strings.Split(replaceWrapLine(scanningInfo.PreScript), "\n"),
+					Scripts:     append(strings.Split(replaceWrapLine(scanningInfo.PreScript), "\n"), outputScript(scanningInfo.Outputs)...),
 					SkipPrepare: true,
 				},
 			}
@@ -220,9 +225,16 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				return resp, fmt.Errorf("failed to get sonar integration information to create scanning task, error: %s", err)
 
 			}
+
+			projectKey := sonar.GetSonarProjectKeyFromConfig(scanningInfo.Parameter)
+			resultAddr, err := sonar.GetSonarAddressWithProjectKey(sonarInfo.ServerAddress, projectKey)
+			if err != nil {
+				log.Errorf("failed to get sonar address with project key, error: %s", err)
+			}
+
 			sonarLinkKeyVal := &commonmodels.KeyVal{
 				Key:   "SONAR_LINK",
-				Value: sonarInfo.ServerAddress,
+				Value: resultAddr,
 			}
 			jobTaskSpec.Properties.Envs = append(jobTaskSpec.Properties.Envs, sonarLinkKeyVal)
 			sonarConfig := fmt.Sprintf("sonar.login=%s\nsonar.host.url=%s\n%s", sonarInfo.Token, sonarInfo.ServerAddress, scanningInfo.Parameter)
@@ -259,7 +271,7 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 				JobName:  jobTask.Name,
 				StepType: config.StepShell,
 				Spec: &step.StepShellSpec{
-					Scripts: strings.Split(replaceWrapLine(scanningInfo.Script), "\n"),
+					Scripts: append(strings.Split(replaceWrapLine(scanningInfo.Script), "\n"), outputScript(scanningInfo.Outputs)...),
 				},
 			}
 			jobTaskSpec.Steps = append(jobTaskSpec.Steps, shellStep)
@@ -272,4 +284,26 @@ func (j *ScanningJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 
 func (j *ScanningJob) LintJob() error {
 	return nil
+}
+
+func (j *ScanningJob) GetOutPuts(log *zap.SugaredLogger) []string {
+	resp := []string{}
+	j.spec = &commonmodels.ZadigScanningJobSpec{}
+	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+		return resp
+	}
+	scanningNames := []string{}
+	for _, scanning := range j.spec.Scannings {
+		scanningNames = append(scanningNames, scanning.Name)
+	}
+	scanningInfos, _, err := commonrepo.NewScanningColl().List(&commonrepo.ScanningListOption{ScanningNames: scanningNames, ProjectName: j.workflow.Project}, 0, 0)
+	if err != nil {
+		log.Errorf("list scanning info failed: %v", err)
+		return resp
+	}
+	for _, scanningInfo := range scanningInfos {
+		jobKey := strings.Join([]string{j.job.Name, scanningInfo.Name}, ".")
+		resp = append(resp, getOutputKey(jobKey, scanningInfo.Outputs)...)
+	}
+	return resp
 }

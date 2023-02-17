@@ -20,14 +20,27 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/setting"
 	"github.com/koderover/zadig/pkg/types"
+	"github.com/koderover/zadig/pkg/types/job"
+)
+
+const (
+	OutputNameRegexString = "^[a-zA-Z0-9_]{1,64}$"
+)
+
+var (
+	OutputNameRegex = regexp.MustCompile(OutputNameRegexString)
 )
 
 type JobCtl interface {
@@ -69,6 +82,20 @@ func InitJobCtl(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) (JobCt
 		resp = &K8sPacthJob{job: job, workflow: workflow}
 	case config.JobZadigScanning:
 		resp = &ScanningJob{job: job, workflow: workflow}
+	case config.JobZadigDistributeImage:
+		resp = &ImageDistributeJob{job: job, workflow: workflow}
+	case config.JobIstioRelease:
+		resp = &IstioReleaseJob{job: job, workflow: workflow}
+	case config.JobIstioRollback:
+		resp = &IstioRollBackJob{job: job, workflow: workflow}
+	case config.JobJira:
+		resp = &JiraJob{job: job, workflow: workflow}
+	case config.JobNacos:
+		resp = &NacosJob{job: job, workflow: workflow}
+	case config.JobApollo:
+		resp = &ApolloJob{job: job, workflow: workflow}
+	case config.JobMeegoTransition:
+		resp = &MeegoTransitionJob{job: job, workflow: workflow}
 	default:
 		return resp, fmt.Errorf("job type not found %s", job.JobType)
 	}
@@ -78,7 +105,7 @@ func InitJobCtl(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) (JobCt
 func Instantiate(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) error {
 	ctl, err := InitJobCtl(job, workflow)
 	if err != nil {
-		return err
+		return warpJobError(job.Name, err)
 	}
 	return ctl.Instantiate()
 }
@@ -86,15 +113,28 @@ func Instantiate(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) error
 func SetPreset(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) error {
 	jobCtl, err := InitJobCtl(job, workflow)
 	if err != nil {
-		return err
+		return warpJobError(job.Name, err)
 	}
+	JobPresetSkiped(job)
 	return jobCtl.SetPreset()
+}
+
+func JobPresetSkiped(job *commonmodels.Job) {
+	if job.RunPolicy == config.ForceRun {
+		job.Skipped = false
+		return
+	}
+	if job.RunPolicy == config.DefaultNotRun {
+		job.Skipped = true
+		return
+	}
+	job.Skipped = false
 }
 
 func ToJobs(job *commonmodels.Job, workflow *commonmodels.WorkflowV4, taskID int64) ([]*commonmodels.JobTask, error) {
 	jobCtl, err := InitJobCtl(job, workflow)
 	if err != nil {
-		return []*commonmodels.JobTask{}, err
+		return []*commonmodels.JobTask{}, warpJobError(job.Name, err)
 	}
 	return jobCtl.ToJobs(taskID)
 }
@@ -102,7 +142,7 @@ func ToJobs(job *commonmodels.Job, workflow *commonmodels.WorkflowV4, taskID int
 func LintJob(job *commonmodels.Job, workflow *commonmodels.WorkflowV4) error {
 	jobCtl, err := InitJobCtl(job, workflow)
 	if err != nil {
-		return err
+		return warpJobError(job.Name, err)
 	}
 	return jobCtl.LintJob()
 }
@@ -113,30 +153,68 @@ func MergeWebhookRepo(workflow *commonmodels.WorkflowV4, repo *types.Repository)
 			if job.JobType == config.JobZadigBuild {
 				jobCtl := &BuildJob{job: job, workflow: workflow}
 				if err := jobCtl.MergeWebhookRepo(repo); err != nil {
-					return err
+					return warpJobError(job.Name, err)
 				}
 			}
 			if job.JobType == config.JobFreestyle {
 				jobCtl := &FreeStyleJob{job: job, workflow: workflow}
 				if err := jobCtl.MergeWebhookRepo(repo); err != nil {
-					return err
+					return warpJobError(job.Name, err)
 				}
 			}
 			if job.JobType == config.JobZadigTesting {
 				jobCtl := &TestingJob{job: job, workflow: workflow}
 				if err := jobCtl.MergeWebhookRepo(repo); err != nil {
-					return err
+					return warpJobError(job.Name, err)
 				}
 			}
 			if job.JobType == config.JobZadigScanning {
 				jobCtl := &ScanningJob{job: job, workflow: workflow}
 				if err := jobCtl.MergeWebhookRepo(repo); err != nil {
-					return err
+					return warpJobError(job.Name, err)
 				}
 			}
 		}
 	}
 	return nil
+}
+
+func GetWorkflowOutputs(workflow *commonmodels.WorkflowV4, currentJobName string, log *zap.SugaredLogger) []string {
+	resp := []string{}
+	jobRankMap := getJobRankMap(workflow.Stages)
+	for _, stage := range workflow.Stages {
+		for _, job := range stage.Jobs {
+			// we only need to get the outputs from job runs before the current job
+			if jobRankMap[job.Name] >= jobRankMap[currentJobName] {
+				return resp
+			}
+			if job.JobType == config.JobZadigBuild {
+				jobCtl := &BuildJob{job: job, workflow: workflow}
+				resp = append(resp, jobCtl.GetOutPuts(log)...)
+			}
+			if job.JobType == config.JobFreestyle {
+				jobCtl := &FreeStyleJob{job: job, workflow: workflow}
+				resp = append(resp, jobCtl.GetOutPuts(log)...)
+			}
+			if job.JobType == config.JobZadigTesting {
+				jobCtl := &TestingJob{job: job, workflow: workflow}
+				resp = append(resp, jobCtl.GetOutPuts(log)...)
+			}
+			if job.JobType == config.JobZadigScanning {
+				jobCtl := &ScanningJob{job: job, workflow: workflow}
+				resp = append(resp, jobCtl.GetOutPuts(log)...)
+			}
+			if job.JobType == config.JobZadigDistributeImage {
+				jobCtl := &ImageDistributeJob{job: job, workflow: workflow}
+				resp = append(resp, jobCtl.GetOutPuts(log)...)
+			}
+			if job.JobType == config.JobPlugin {
+				jobCtl := &PluginJob{job: job, workflow: workflow}
+				resp = append(resp, jobCtl.GetOutPuts(log)...)
+			}
+		}
+	}
+	return resp
 }
 
 func GetRepos(workflow *commonmodels.WorkflowV4) ([]*types.Repository, error) {
@@ -147,7 +225,7 @@ func GetRepos(workflow *commonmodels.WorkflowV4) ([]*types.Repository, error) {
 				jobCtl := &BuildJob{job: job, workflow: workflow}
 				buildRepos, err := jobCtl.GetRepos()
 				if err != nil {
-					return resp, err
+					return resp, warpJobError(job.Name, err)
 				}
 				resp = append(resp, buildRepos...)
 			}
@@ -155,7 +233,7 @@ func GetRepos(workflow *commonmodels.WorkflowV4) ([]*types.Repository, error) {
 				jobCtl := &FreeStyleJob{job: job, workflow: workflow}
 				freeStyleRepos, err := jobCtl.GetRepos()
 				if err != nil {
-					return resp, err
+					return resp, warpJobError(job.Name, err)
 				}
 				resp = append(resp, freeStyleRepos...)
 			}
@@ -163,7 +241,7 @@ func GetRepos(workflow *commonmodels.WorkflowV4) ([]*types.Repository, error) {
 				jobCtl := &TestingJob{job: job, workflow: workflow}
 				testingRepos, err := jobCtl.GetRepos()
 				if err != nil {
-					return resp, err
+					return resp, warpJobError(job.Name, err)
 				}
 				resp = append(resp, testingRepos...)
 			}
@@ -171,7 +249,7 @@ func GetRepos(workflow *commonmodels.WorkflowV4) ([]*types.Repository, error) {
 				jobCtl := &ScanningJob{job: job, workflow: workflow}
 				scanningRepos, err := jobCtl.GetRepos()
 				if err != nil {
-					return resp, err
+					return resp, warpJobError(job.Name, err)
 				}
 				resp = append(resp, scanningRepos...)
 			}
@@ -193,27 +271,30 @@ func MergeArgs(workflow, workflowArgs *commonmodels.WorkflowV4) error {
 	}
 	for _, stage := range workflow.Stages {
 		for _, job := range stage.Jobs {
-			jobCtl, err := InitJobCtl(job, workflow)
-			if err != nil {
-				return err
-			}
-			if err := jobCtl.SetPreset(); err != nil {
-				return err
+			if err := SetPreset(job, workflow); err != nil {
+				return warpJobError(job.Name, err)
 			}
 			jobKey := strings.Join([]string{job.Name, string(job.JobType)}, "-")
 			if jobArgs, ok := argsMap[jobKey]; ok {
-				job.Skipped = jobArgs.Skipped
+				job.Skipped = JobSkiped(jobArgs)
 				jobCtl, err := InitJobCtl(job, workflow)
 				if err != nil {
-					return err
+					return warpJobError(job.Name, err)
 				}
 				if err := jobCtl.MergeArgs(jobArgs); err != nil {
-					return err
+					return warpJobError(job.Name, err)
 				}
 			}
 		}
 	}
 	return nil
+}
+
+func JobSkiped(job *commonmodels.Job) bool {
+	if job.RunPolicy == config.ForceRun {
+		return false
+	}
+	return job.Skipped
 }
 
 // use service name and service module hash to generate job name
@@ -234,6 +315,7 @@ func getReposVariables(repos []*types.Repository) []*commonmodels.KeyVal {
 		ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf(repoNameIndex), Value: repo.RepoName, IsCredential: false})
 
 		repoName := strings.Replace(repo.RepoName, "-", "_", -1)
+		repoName = strings.Replace(repo.RepoName, ".", "_", -1)
 
 		repoIndex := fmt.Sprintf("REPO_%d", index)
 		ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf(repoIndex), Value: repoName, IsCredential: false})
@@ -261,6 +343,7 @@ func getReposVariables(repos []*types.Repository) []*commonmodels.KeyVal {
 		if len(repo.CommitID) > 0 {
 			ret = append(ret, &commonmodels.KeyVal{Key: fmt.Sprintf("%s_COMMIT_ID", repoName), Value: repo.CommitID, IsCredential: false})
 		}
+		ret = append(ret, getEnvFromCommitMsg(repo.CommitMessage)...)
 	}
 	return ret
 }
@@ -340,4 +423,85 @@ func getJobRankMap(stages []*commonmodels.WorkflowStage) map[string]int {
 		index++
 	}
 	return resp
+}
+
+func getOutputKey(jobKey string, outputs []*commonmodels.Output) []string {
+	resp := []string{}
+	for _, output := range outputs {
+		resp = append(resp, job.GetJobOutputKey(jobKey, output.Name))
+	}
+	return resp
+}
+
+// generate script to save outputs variable to file
+func outputScript(outputs []*commonmodels.Output) []string {
+	resp := []string{"set +ex"}
+	for _, output := range outputs {
+		resp = append(resp, fmt.Sprintf("echo $%s > %s", output.Name, path.Join(job.JobOutputDir, output.Name)))
+	}
+	return resp
+}
+
+func checkOutputNames(outputs []*commonmodels.Output) error {
+	for _, output := range outputs {
+		if match := OutputNameRegex.MatchString(output.Name); !match {
+			return fmt.Errorf("output name must match %s", OutputNameRegexString)
+		}
+	}
+	return nil
+}
+
+func getShareStorageDetail(shareStorages []*commonmodels.ShareStorage, shareStorageInfo *commonmodels.ShareStorageInfo, workflowName string, taskID int64) []*commonmodels.StorageDetail {
+	resp := []*commonmodels.StorageDetail{}
+	if shareStorageInfo == nil {
+		return resp
+	}
+	if !shareStorageInfo.Enabled {
+		return resp
+	}
+	if len(shareStorages) == 0 || len(shareStorageInfo.ShareStorages) == 0 {
+		return resp
+	}
+	storageMap := make(map[string]*commonmodels.ShareStorage, len(shareStorages))
+	for _, shareStorage := range shareStorages {
+		storageMap[shareStorage.Name] = shareStorage
+	}
+	for _, storageInfo := range shareStorageInfo.ShareStorages {
+		storage, ok := storageMap[storageInfo.Name]
+		if !ok {
+			continue
+		}
+		storageDetail := &commonmodels.StorageDetail{
+			Name:      storageInfo.Name,
+			Type:      types.NFSMedium,
+			SubPath:   types.GetShareStorageSubPath(workflowName, storageInfo.Name, taskID),
+			MountPath: storage.Path,
+		}
+		resp = append(resp, storageDetail)
+	}
+	return resp
+}
+
+func getEnvFromCommitMsg(commitMsg string) []*commonmodels.KeyVal {
+	resp := []*commonmodels.KeyVal{}
+	if commitMsg == "" {
+		return resp
+	}
+	compileRegex := regexp.MustCompile(`(?U)#(\w+=.+)#`)
+	kvArrs := compileRegex.FindAllStringSubmatch(commitMsg, -1)
+	for _, kvArr := range kvArrs {
+		if len(kvArr) == 0 {
+			continue
+		}
+		keyValStr := kvArr[len(kvArr)-1]
+		keyValArr := strings.Split(keyValStr, "=")
+		if len(keyValArr) == 2 {
+			resp = append(resp, &commonmodels.KeyVal{Key: keyValArr[0], Value: keyValArr[1], Type: commonmodels.StringType})
+		}
+	}
+	return resp
+}
+
+func warpJobError(jobName string, err error) error {
+	return fmt.Errorf("[job: %s] %v", jobName, err)
 }

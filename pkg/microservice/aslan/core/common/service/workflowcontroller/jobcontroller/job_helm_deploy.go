@@ -24,12 +24,6 @@ import (
 	"strings"
 	"time"
 
-	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
-	helmtool "github.com/koderover/zadig/pkg/tool/helmclient"
-	s3tool "github.com/koderover/zadig/pkg/tool/s3"
-	"github.com/koderover/zadig/pkg/util/converter"
-	fsutil "github.com/koderover/zadig/pkg/util/fs"
-	yamlutil "github.com/koderover/zadig/pkg/util/yaml"
 	helmclient "github.com/mittwald/go-helm-client"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -38,6 +32,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/rest"
 	crClient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	kubeclient "github.com/koderover/zadig/pkg/shared/kube/client"
+	helmtool "github.com/koderover/zadig/pkg/tool/helmclient"
+	s3tool "github.com/koderover/zadig/pkg/tool/s3"
+	"github.com/koderover/zadig/pkg/util/converter"
+	fsutil "github.com/koderover/zadig/pkg/util/fs"
+	yamlutil "github.com/koderover/zadig/pkg/util/yaml"
 
 	configbase "github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
@@ -72,6 +73,7 @@ func NewHelmDeployJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.Wo
 	if err := commonmodels.IToi(job.Spec, jobTaskSpec); err != nil {
 		logger.Error(err)
 	}
+	job.Spec = jobTaskSpec
 	return &HelmDeployJobCtl{
 		job:         job,
 		workflowCtx: workflowCtx,
@@ -84,6 +86,9 @@ func NewHelmDeployJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.Wo
 func (c *HelmDeployJobCtl) Clean(ctx context.Context) {}
 
 func (c *HelmDeployJobCtl) Run(ctx context.Context) {
+	c.job.Status = config.StatusRunning
+	c.ack()
+
 	env, err := commonrepo.NewProductColl().Find(&commonrepo.ProductFindOptions{
 		Name:    c.workflowCtx.ProjectName,
 		EnvName: c.jobTaskSpec.Env,
@@ -119,7 +124,7 @@ func (c *HelmDeployJobCtl) Run(ctx context.Context) {
 
 	var (
 		productInfo              *commonmodels.Product
-		renderChart              *templatemodels.RenderChart
+		renderChart              *templatemodels.ServiceRender
 		replacedValuesYaml       string
 		mergedValuesYaml         string
 		replacedMergedValuesYaml string
@@ -357,6 +362,16 @@ func (c *HelmDeployJobCtl) Run(ctx context.Context) {
 		MaxHistory:  10,
 	}
 	c.logger.Infof("start to upgrade helm chart, release name: %s, chart name: %s, version: %s", chartSpec.ReleaseName, chartSpec.ChartName, chartSpec.Version)
+	deploytargets := map[string]string{}
+	for _, target := range c.jobTaskSpec.ImageAndModules {
+		deploytargets[target.ServiceModule] = target.Image
+	}
+	// update product images even if delpoy failed.
+	defer func() {
+		if err := updateProductImageByNs(env.Namespace, c.workflowCtx.ProjectName, c.jobTaskSpec.ServiceName, deploytargets, c.logger); err != nil {
+			c.logger.Error(err)
+		}
+	}()
 	done := make(chan bool)
 	go func(chan bool) {
 		if _, err = helmClient.InstallOrUpgradeChart(ctx, &chartSpec, nil); err != nil {
@@ -443,7 +458,7 @@ func (c *HelmDeployJobCtl) downloadService(productName, serviceName, storageURI 
 	if s3Storage.Provider == setting.ProviderSourceAli {
 		forcedPathStyle = false
 	}
-	s3Client, err := s3tool.NewClient(s3Storage.Endpoint, s3Storage.Ak, s3Storage.Sk, s3Storage.Insecure, forcedPathStyle)
+	s3Client, err := s3tool.NewClient(s3Storage.Endpoint, s3Storage.Ak, s3Storage.Sk, s3Storage.Region, s3Storage.Insecure, forcedPathStyle)
 	if err != nil {
 		c.logger.Errorf("failed to create s3 client, err: %s", err)
 		return "", err

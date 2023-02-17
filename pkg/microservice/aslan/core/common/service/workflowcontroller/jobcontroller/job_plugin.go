@@ -18,8 +18,9 @@ package jobcontroller
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
@@ -41,6 +42,7 @@ type PluginJobCtl struct {
 	kubeclient  crClient.Client
 	clientset   kubernetes.Interface
 	restConfig  *rest.Config
+	apiServer   crClient.Reader
 	jobTaskSpec *commonmodels.JobTaskPluginSpec
 	ack         func()
 }
@@ -50,6 +52,7 @@ func NewPluginsJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.Workf
 	if err := commonmodels.IToi(job.Spec, jobTaskSpec); err != nil {
 		logger.Error(err)
 	}
+	job.Spec = jobTaskSpec
 	return &PluginJobCtl{
 		job:         job,
 		workflowCtx: workflowCtx,
@@ -94,10 +97,11 @@ func (c *PluginJobCtl) run(ctx context.Context) error {
 		c.kubeclient = krkubeclient.Client()
 		c.clientset = krkubeclient.Clientset()
 		c.restConfig = krkubeclient.RESTConfig()
+		c.apiServer = krkubeclient.APIReader()
 	default:
 		c.jobTaskSpec.Properties.Namespace = setting.AttachedClusterNamespace
 
-		crClient, clientset, restConfig, err := GetK8sClients(hubServerAddr, c.jobTaskSpec.Properties.ClusterID)
+		crClient, clientset, restConfig, apiServer, err := GetK8sClients(hubServerAddr, c.jobTaskSpec.Properties.ClusterID)
 		if err != nil {
 			logError(c.job, err.Error(), c.logger)
 			return err
@@ -105,12 +109,14 @@ func (c *PluginJobCtl) run(ctx context.Context) error {
 		c.kubeclient = crClient
 		c.clientset = clientset
 		c.restConfig = restConfig
+		c.apiServer = apiServer
 	}
 
 	jobLabel := &JobLabel{
 		JobType: string(c.job.JobType),
 		JobName: c.job.K8sJobName,
 	}
+	c.jobTaskSpec.Properties.Registries = getMatchedRegistries(c.jobTaskSpec.Plugin.Image, c.jobTaskSpec.Properties.Registries)
 	job, err := buildPlainJob(c.job.K8sJobName, c.jobTaskSpec.Properties.ResourceRequest, c.jobTaskSpec.Properties.ResReqSpec, c.job, c.jobTaskSpec, c.workflowCtx)
 	if err != nil {
 		msg := fmt.Sprintf("create job context error: %v", err)
@@ -125,6 +131,13 @@ func (c *PluginJobCtl) run(ctx context.Context) error {
 		logError(c.job, msg, c.logger)
 		return err
 	}
+
+	if err := createOrUpdateRegistrySecrets(c.jobTaskSpec.Properties.Namespace, c.jobTaskSpec.Properties.Registries, c.kubeclient); err != nil {
+		msg := fmt.Sprintf("create secret error: %v", err)
+		logError(c.job, msg, c.logger)
+		return errors.New(msg)
+	}
+
 	if err := updater.CreateJob(job, c.kubeclient); err != nil {
 		msg := fmt.Sprintf("create job error: %v", err)
 		logError(c.job, msg, c.logger)
@@ -135,9 +148,19 @@ func (c *PluginJobCtl) run(ctx context.Context) error {
 }
 
 func (c *PluginJobCtl) wait(ctx context.Context) {
-	status := waitPlainJobEnd(ctx, int(c.jobTaskSpec.Properties.Timeout), c.jobTaskSpec.Properties.Namespace, c.job.K8sJobName, c.kubeclient, c.logger)
+	var err error
+	timeout := time.After(time.Duration(c.jobTaskSpec.Properties.Timeout) * time.Minute)
+	c.job.Status, err = waitJobStart(ctx, c.jobTaskSpec.Properties.Namespace, c.job.K8sJobName, c.kubeclient, c.apiServer, timeout, c.logger)
+	if err != nil {
+		c.logger.Errorf("wait job start error: %v", err)
+	}
+	if c.job.Status == config.StatusRunning {
+		c.ack()
+	} else {
+		return
+	}
+	status := waitPlainJobEnd(ctx, int(c.jobTaskSpec.Properties.Timeout), timeout, c.jobTaskSpec.Properties.Namespace, c.job.K8sJobName, c.kubeclient, c.logger)
 	c.job.Status = status
-
 }
 
 func (c *PluginJobCtl) complete(ctx context.Context) {
@@ -156,20 +179,16 @@ func (c *PluginJobCtl) complete(ctx context.Context) {
 	}()
 
 	// get job outputs info from pod terminate message.
-	outputs, err := getJobOutput(c.jobTaskSpec.Properties.Namespace, c.job.Name, jobLabel, c.kubeclient)
-	if err != nil {
+	if err := getJobOutputFromTerminalMsg(c.jobTaskSpec.Properties.Namespace, c.job.Name, c.job, c.workflowCtx, c.kubeclient); err != nil {
 		c.logger.Error(err)
 		c.job.Error = err.Error()
-	}
-
-	// write jobs output info to globalcontext so other job can use like this $(workflow.jobName.outputName)
-	for _, output := range outputs {
-		c.workflowCtx.GlobalContextSet(strings.Join([]string{"workflow", c.job.Name, output.Name}, "."), output.Value)
 	}
 
 	if err := saveContainerLog(c.jobTaskSpec.Properties.Namespace, c.jobTaskSpec.Properties.ClusterID, c.workflowCtx.WorkflowName, c.job.Name, c.workflowCtx.TaskID, jobLabel, c.kubeclient); err != nil {
 		c.logger.Error(err)
-		c.job.Error = err.Error()
+		if c.job.Error == "" {
+			c.job.Error = err.Error()
+		}
 		return
 	}
 }

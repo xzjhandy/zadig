@@ -66,6 +66,7 @@ type Workflow struct {
 	Description          string                     `json:"description,omitempty"`
 	BaseName             string                     `json:"base_name"`
 	BaseRefs             []string                   `json:"base_refs"`
+	NeverRun             bool                       `json:"never_run"`
 }
 
 type TaskInfo struct {
@@ -134,8 +135,8 @@ func AutoCreateWorkflow(productName string, log *zap.SugaredLogger) *EnvStatus {
 	}
 	createArgs.initDefaultWorkflows()
 
-	// helm project may have customized products, use the real created products
-	if productTmpl.ProductFeature != nil && productTmpl.ProductFeature.DeployType == setting.HelmDeployType {
+	// helm/k8syaml project may have customized products, use the real created products
+	if productTmpl.IsHelmProduct() || productTmpl.IsK8sYamlProduct() {
 		productList, err := commonrepo.NewProductColl().List(&commonrepo.ProductListOptions{
 			Name: productName,
 		})
@@ -645,7 +646,7 @@ func ListWorkflows(projects []string, userID string, names []string, log *zap.Su
 		return nil, e.ErrListWorkflow.AddDesc(err.Error())
 	}
 
-	var workflowNames []string
+	workflowNames := []string{}
 	var res []*Workflow
 	workflowCMMap, err := collaboration.GetWorkflowCMMap(projects, log)
 	if err != nil {
@@ -720,10 +721,12 @@ func getRecentTaskInfo(workflow *Workflow, tasks []*commonrepo.TaskPreview) {
 	recentTask := &commonrepo.TaskPreview{}
 	recentFailedTask := &commonrepo.TaskPreview{}
 	recentSucceedTask := &commonrepo.TaskPreview{}
+	workflow.NeverRun = true
 	for _, task := range tasks {
 		if task.PipelineName != workflow.Name {
 			continue
 		}
+		workflow.NeverRun = false
 		if task.TaskID > recentTask.TaskID {
 			recentTask = task
 		}

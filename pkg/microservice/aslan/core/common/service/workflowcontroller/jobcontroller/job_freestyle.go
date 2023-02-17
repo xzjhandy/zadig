@@ -21,9 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	crClient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,6 +51,7 @@ type FreestyleJobCtl struct {
 	kubeclient  crClient.Client
 	clientset   kubernetes.Interface
 	restConfig  *rest.Config
+	apiServer   crClient.Reader
 	paths       *string
 	jobTaskSpec *commonmodels.JobTaskFreestyleSpec
 	ack         func()
@@ -61,6 +63,7 @@ func NewFreestyleJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.Wor
 	if err := commonmodels.IToi(job.Spec, jobTaskSpec); err != nil {
 		logger.Error(err)
 	}
+	job.Spec = jobTaskSpec
 	return &FreestyleJobCtl{
 		job:         job,
 		workflowCtx: workflowCtx,
@@ -98,10 +101,11 @@ func (c *FreestyleJobCtl) prepare(ctx context.Context) error {
 		c.jobTaskSpec.Properties.ClusterID = setting.LocalClusterID
 	}
 	// init step configration.
-	if err := stepcontroller.PrepareSteps(ctx, c.workflowCtx, &c.jobTaskSpec.Properties.Paths, c.jobTaskSpec.Steps, c.logger); err != nil {
+	if err := stepcontroller.PrepareSteps(ctx, c.workflowCtx, &c.jobTaskSpec.Properties.Paths, c.job.Name, c.jobTaskSpec.Steps, c.logger); err != nil {
 		logError(c.job, err.Error(), c.logger)
 		return err
 	}
+	c.ack()
 	return nil
 }
 
@@ -114,10 +118,11 @@ func (c *FreestyleJobCtl) run(ctx context.Context) error {
 		c.kubeclient = krkubeclient.Client()
 		c.clientset = krkubeclient.Clientset()
 		c.restConfig = krkubeclient.RESTConfig()
+		c.apiServer = krkubeclient.APIReader()
 	default:
 		c.jobTaskSpec.Properties.Namespace = setting.AttachedClusterNamespace
 
-		crClient, clientset, restConfig, err := GetK8sClients(hubServerAddr, c.jobTaskSpec.Properties.ClusterID)
+		crClient, clientset, restConfig, apiServer, err := GetK8sClients(hubServerAddr, c.jobTaskSpec.Properties.ClusterID)
 		if err != nil {
 			logError(c.job, err.Error(), c.logger)
 			return err
@@ -125,6 +130,7 @@ func (c *FreestyleJobCtl) run(ctx context.Context) error {
 		c.kubeclient = crClient
 		c.clientset = clientset
 		c.restConfig = restConfig
+		c.apiServer = apiServer
 	}
 
 	// decide which docker host to use.
@@ -180,11 +186,9 @@ func (c *FreestyleJobCtl) run(ctx context.Context) error {
 
 	c.logger.Infof("succeed to create cm for job %s", c.job.K8sJobName)
 
-	// TODO: do not use default image
 	jobImage := getBaseImage(c.jobTaskSpec.Properties.BuildOS, c.jobTaskSpec.Properties.ImageFrom)
-	// jobImage := "koderover.tencentcloudcr.com/test/job-excutor:guoyu-test2"
-	// jobImage := getReaperImage(config.ReaperImage(), c.job.Properties.BuildOS)
 
+	c.jobTaskSpec.Properties.Registries = getMatchedRegistries(jobImage, c.jobTaskSpec.Properties.Registries)
 	//Resource request default value is LOW
 	job, err := buildJob(c.job.JobType, jobImage, c.job.K8sJobName, c.jobTaskSpec.Properties.ClusterID, c.jobTaskSpec.Properties.Namespace, c.jobTaskSpec.Properties.ResourceRequest, c.jobTaskSpec.Properties.ResReqSpec, c.job, c.jobTaskSpec, c.workflowCtx, nil)
 	if err != nil {
@@ -201,15 +205,12 @@ func (c *FreestyleJobCtl) run(ctx context.Context) error {
 		return errors.New(msg)
 	}
 
-	// 将集成到KodeRover的私有镜像仓库的访问权限设置到namespace中
-	// if err := createOrUpdateRegistrySecrets(p.KubeNamespace, pipelineTask.ConfigPayload.RegistryID, p.Task.Registries, p.kubeClient); err != nil {
-	// 	msg := fmt.Sprintf("create secret error: %v", err)
-	// 	p.Log.Error(msg)
-	// 	p.Task.TaskStatus = config.StatusFailed
-	// 	p.Task.Error = msg
-	// 	p.SetBuildStatusCompleted(config.StatusFailed)
-	// 	return
-	// }
+	if err := createOrUpdateRegistrySecrets(c.jobTaskSpec.Properties.Namespace, c.jobTaskSpec.Properties.Registries, c.kubeclient); err != nil {
+		msg := fmt.Sprintf("create secret error: %v", err)
+		logError(c.job, msg, c.logger)
+		return errors.New(msg)
+	}
+
 	if err := updater.CreateJob(job, c.kubeclient); err != nil {
 		msg := fmt.Sprintf("create job error: %v", err)
 		logError(c.job, msg, c.logger)
@@ -220,8 +221,18 @@ func (c *FreestyleJobCtl) run(ctx context.Context) error {
 }
 
 func (c *FreestyleJobCtl) wait(ctx context.Context) {
-	status := waitJobEndWithFile(ctx, int(c.jobTaskSpec.Properties.Timeout), c.jobTaskSpec.Properties.Namespace, c.job.K8sJobName, true, c.kubeclient, c.clientset, c.restConfig, c.logger)
-	c.job.Status = status
+	var err error
+	taskTimeout := time.After(time.Duration(c.jobTaskSpec.Properties.Timeout) * time.Minute)
+	c.job.Status, err = waitJobStart(ctx, c.jobTaskSpec.Properties.Namespace, c.job.K8sJobName, c.kubeclient, c.apiServer, taskTimeout, c.logger)
+	if err != nil {
+		c.job.Error = err.Error()
+	}
+	if c.job.Status == config.StatusRunning {
+		c.ack()
+	} else {
+		return
+	}
+	c.job.Status, c.job.Error = waitJobEndWithFile(ctx, taskTimeout, c.jobTaskSpec.Properties.Namespace, c.job.K8sJobName, true, c.kubeclient, c.clientset, c.restConfig, c.logger)
 }
 
 func (c *FreestyleJobCtl) complete(ctx context.Context) {
@@ -243,23 +254,18 @@ func (c *FreestyleJobCtl) complete(ctx context.Context) {
 	}()
 
 	// get job outputs info from pod terminate message.
-	outputs, err := getJobOutput(c.jobTaskSpec.Properties.Namespace, c.job.Name, jobLabel, c.kubeclient)
-	if err != nil {
+	if err := getJobOutputFromRunningPod(c.jobTaskSpec.Properties.Namespace, c.job.Name, c.job, c.workflowCtx, c.kubeclient, c.clientset, c.restConfig); err != nil {
 		c.logger.Error(err)
-		c.job.Error = err.Error()
-	}
-
-	// write jobs output info to globalcontext so other job can use like this $(jobName.outputName)
-	for _, output := range outputs {
-		c.workflowCtx.GlobalContextSet(strings.Join([]string{"workflow", c.job.Name, output.Name}, "."), output.Value)
 	}
 
 	if err := saveContainerLog(c.jobTaskSpec.Properties.Namespace, c.jobTaskSpec.Properties.ClusterID, c.workflowCtx.WorkflowName, c.job.Name, c.workflowCtx.TaskID, jobLabel, c.kubeclient); err != nil {
 		c.logger.Error(err)
-		c.job.Error = err.Error()
+		if c.job.Error == "" {
+			c.job.Error = err.Error()
+		}
 		return
 	}
-	if err := stepcontroller.SummarizeSteps(ctx, c.workflowCtx, &c.jobTaskSpec.Properties.Paths, c.jobTaskSpec.Steps, c.logger); err != nil {
+	if err := stepcontroller.SummarizeSteps(ctx, c.workflowCtx, &c.jobTaskSpec.Properties.Paths, c.job.Name, c.jobTaskSpec.Steps, c.logger); err != nil {
 		c.logger.Error(err)
 		c.job.Error = err.Error()
 		return

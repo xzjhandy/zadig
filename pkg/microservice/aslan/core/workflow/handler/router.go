@@ -120,7 +120,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 	workflowtask := router.Group("workflowtask")
 	{
 		//todo 修改权限的uuid
-		workflowtask.GET("/targets/:productName/:namespace", GetWorkflowArgs)
+		workflowtask.POST("/targets/:productName/:namespace", GetWorkflowArgs)
 		workflowtask.GET("/preset/:namespace/:workflowName", PresetWorkflowArgs)
 		workflowtask.POST("/:id", CreateWorkflowTask)
 		workflowtask.PUT("/:id", CreateArtifactWorkflowTask)
@@ -171,6 +171,8 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		workflowV4.POST("", CreateWorkflowV4)
 		workflowV4.GET("", ListWorkflowV4)
 		workflowV4.POST("/lint", LintWorkflowV4)
+		workflowV4.POST("/check/lark/:name", CheckWorkflowV4LarkApproval)
+		workflowV4.POST("/output/:jobName", GetWorkflowGlabalVars)
 		workflowV4.GET("/name/:name", FindWorkflowV4)
 		workflowV4.PUT("/:name", UpdateWorkflowV4)
 		workflowV4.DELETE("/:name", DeleteWorkflowV4)
@@ -180,13 +182,30 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		workflowV4.POST("/webhook/:workflowName", CreateWebhookForWorkflowV4)
 		workflowV4.PUT("/webhook/:workflowName", UpdateWebhookForWorkflowV4)
 		workflowV4.DELETE("/webhook/:workflowName/trigger/:triggerName", DeleteWebhookForWorkflowV4)
+		workflowV4.GET("/jirahook/preset", GetJiraHookForWorkflowV4Preset)
+		workflowV4.GET("/jirahook/:workflowName", ListJiraHookForWorkflowV4)
+		workflowV4.POST("/jirahook/:workflowName", CreateJiraHookForWorkflowV4)
+		workflowV4.PUT("/jirahook/:workflowName", UpdateJiraHookForWorkflowV4)
+		workflowV4.DELETE("/jirahook/:workflowName/:hookName", DeleteJiraHookForWorkflowV4)
+		workflowV4.GET("/meegohook/preset", GetMeegoHookForWorkflowV4Preset)
+		workflowV4.GET("/meegohook/:workflowName", ListMeegoHookForWorkflowV4)
+		workflowV4.POST("/meegohook/:workflowName", CreateMeegoHookForWorkflowV4)
+		workflowV4.PUT("/meegohook/:workflowName", UpdateMeegoHookForWorkflowV4)
+		workflowV4.DELETE("/meegohook/:workflowName/:hookName", DeleteMeegoHookForWorkflowV4)
+		workflowV4.GET("/generalhook/preset", GetGeneralHookForWorkflowV4Preset)
+		workflowV4.GET("/generalhook/:workflowName", ListGeneralHookForWorkflowV4)
+		workflowV4.POST("/generalhook/:workflowName", CreateGeneralHookForWorkflowV4)
+		workflowV4.PUT("/generalhook/:workflowName", UpdateGeneralHookForWorkflowV4)
+		workflowV4.DELETE("/generalhook/:workflowName/:hookName", DeleteGeneralHookForWorkflowV4)
+		workflowV4.POST("/generalhook/:workflowName/:hookName/webhook", GeneralHookEventHandler)
 		workflowV4.GET("/cron/preset", GetCronForWorkflowV4Preset)
 		workflowV4.GET("/cron", ListCronForWorkflowV4)
 		workflowV4.POST("/cron/:workflowName", CreateCronForWorkflowV4)
 		workflowV4.PUT("/cron", UpdateCronForWorkflowV4)
 		workflowV4.DELETE("/cron/:workflowName/trigger/:cronID", DeleteCronForWorkflowV4)
 		workflowV4.POST("/patch", GetPatchParams)
-
+		workflowV4.GET("/sharestorage", CheckShareStorageEnabled)
+		workflowV4.GET("/all", ListAllAvailableWorkflows)
 	}
 
 	// ---------------------------------------------------------------------------------------
@@ -201,6 +220,7 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		taskV4.GET("/clone/workflow/:workflowName/task/:taskID", CloneWorkflowTaskV4)
 		taskV4.POST("/approve", ApproveStage)
 		taskV4.GET("/workflow/:workflowName/taskId/:taskId/job/:jobName", GetWorkflowV4ArtifactFileContent)
+		taskV4.POST("/trigger", CreateWorkflowTaskV4ByBuildInTrigger)
 	}
 
 	// ---------------------------------------------------------------------------------------
@@ -243,5 +263,15 @@ func (*OpenAPIRouter) Inject(router *gin.RouterGroup) {
 		custom.GET("/task", OpenAPIGetWorkflowTaskV4)
 		custom.DELETE("/task", OpenAPICancelWorkflowTaskV4)
 		custom.POST("/task/approve", ApproveStage)
+	}
+
+	view := router.Group("view")
+	{
+		view.POST("", OpenAPICreateWorkflowView)
+	}
+
+	product := router.Group("product")
+	{
+		product.POST("/task", OpenAPICreateProductWorkflowTask)
 	}
 }

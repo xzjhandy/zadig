@@ -61,6 +61,8 @@ type YamlTemplate struct {
 	Content      string                  `json:"content"`
 	Variable     []*models.ChartVariable `json:"variable"`
 	VariableYaml string                  `json:"variable_yaml"`
+	// services vars stores the flat keys of variable which can be edited in service templates, used in k8s projects
+	ServiceVars []string `json:"service_vars"`
 }
 
 type YamlListObject struct {
@@ -69,14 +71,22 @@ type YamlListObject struct {
 }
 
 type YamlDetail struct {
-	ID           string                  `json:"id"`
-	Name         string                  `json:"name"`
-	Content      string                  `json:"content"`
-	Variables    []*models.ChartVariable `json:"variable"`
-	VariableYaml string                  `json:"variable_yaml"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	//Variables    []*models.ChartVariable `json:"variable"`
+	VariableYaml string               `json:"variable_yaml"`
+	VariableKVs  []*models.VariableKV `json:"variable_kvs"`
+	ServiceVars  []string             `json:"service_vars"`
 }
 
 type ServiceReference struct {
 	ProjectName string `json:"project_name"`
 	ServiceName string `json:"service_name"`
+}
+
+type BuildTemplateReference struct {
+	BuildName     string   `json:"build_name"`
+	ProjectName   string   `json:"project_name"`
+	ServiceModule []string `json:"service_module"`
 }

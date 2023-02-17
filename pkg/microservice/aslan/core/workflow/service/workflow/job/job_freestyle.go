@@ -18,6 +18,7 @@ package job
 
 import (
 	"fmt"
+	"strings"
 
 	configbase "github.com/koderover/zadig/pkg/config"
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
@@ -28,6 +29,7 @@ import (
 	"github.com/koderover/zadig/pkg/tool/log"
 	"github.com/koderover/zadig/pkg/types"
 	steptypes "github.com/koderover/zadig/pkg/types/step"
+	"go.uber.org/zap"
 )
 
 type FreeStyleJob struct {
@@ -51,25 +53,25 @@ func (j *FreeStyleJob) Instantiate() error {
 		case config.StepTools:
 			stepSpec := &steptypes.StepToolInstallSpec{}
 			if err := commonmodels.IToiYaml(step.Spec, stepSpec); err != nil {
-				return err
+				return fmt.Errorf("parse tool install step spec error: %v", err)
 			}
 			step.Spec = stepSpec
 		case config.StepGit:
 			stepSpec := &steptypes.StepGitSpec{}
 			if err := commonmodels.IToiYaml(step.Spec, stepSpec); err != nil {
-				return err
+				return fmt.Errorf("parse git step spec error: %v", err)
 			}
 			step.Spec = stepSpec
 		case config.StepShell:
 			stepSpec := &steptypes.StepShellSpec{}
 			if err := commonmodels.IToiYaml(step.Spec, stepSpec); err != nil {
-				return err
+				return fmt.Errorf("parse shell step spec error: %v", err)
 			}
 			step.Spec = stepSpec
 		case config.StepArchive:
 			stepSpec := &steptypes.StepArchiveSpec{}
 			if err := commonmodels.IToiYaml(step.Spec, stepSpec); err != nil {
-				return err
+				return fmt.Errorf("parse archive step spec error: %v", err)
 			}
 			step.Spec = stepSpec
 		default:
@@ -135,11 +137,11 @@ func (j *FreeStyleJob) MergeArgs(args *commonmodels.Job) error {
 				}
 				stepSpec := &steptypes.StepGitSpec{}
 				if err := commonmodels.IToi(step.Spec, stepSpec); err != nil {
-					return err
+					return fmt.Errorf("parse git step spec error: %v", err)
 				}
 				stepArgsSpec := &steptypes.StepGitSpec{}
 				if err := commonmodels.IToi(stepArgs.Spec, stepArgsSpec); err != nil {
-					return err
+					return fmt.Errorf("parse git step spec error: %v", err)
 				}
 				stepSpec.Repos = mergeRepos(stepSpec.Repos, stepArgsSpec.Repos)
 				step.Spec = stepSpec
@@ -162,7 +164,7 @@ func (j *FreeStyleJob) MergeWebhookRepo(webhookRepo *types.Repository) error {
 		}
 		stepSpec := &steptypes.StepGitSpec{}
 		if err := commonmodels.IToi(step.Spec, stepSpec); err != nil {
-			return err
+			return fmt.Errorf("parse git step spec error: %v", err)
 		}
 		stepSpec.Repos = mergeRepos(stepSpec.Repos, []*types.Repository{webhookRepo})
 		step.Spec = stepSpec
@@ -181,22 +183,26 @@ func (j *FreeStyleJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 	j.job.Spec = j.spec
 	jobTaskSpec := &commonmodels.JobTaskFreestyleSpec{
 		Properties: *j.spec.Properties,
-		Steps:      stepsToStepTasks(j.spec.Steps),
+		Steps:      stepsToStepTasks(j.spec.Steps, j.spec.Outputs),
 	}
 	jobTask := &commonmodels.JobTask{
 		Name:    j.job.Name,
+		Key:     j.job.Name,
 		JobType: string(config.JobFreestyle),
 		Spec:    jobTaskSpec,
 		Timeout: j.spec.Properties.Timeout,
+		Outputs: j.spec.Outputs,
 	}
 	registries, err := commonservice.ListRegistryNamespaces("", true, logger)
 	if err != nil {
 		return resp, err
 	}
 	jobTaskSpec.Properties.Registries = registries
+	jobTaskSpec.Properties.ShareStorageDetails = getShareStorageDetail(j.workflow.ShareStorages, j.spec.Properties.ShareStorageInfo, j.workflow.Name, taskID)
+
 	basicImage, err := commonrepo.NewBasicImageColl().Find(jobTaskSpec.Properties.ImageID)
 	if err != nil {
-		return resp, err
+		return resp, fmt.Errorf("failed to find base image: %s,error :%v", jobTaskSpec.Properties.ImageID, err)
 	}
 	jobTaskSpec.Properties.BuildOS = basicImage.Value
 	// save user defined variables.
@@ -205,7 +211,7 @@ func (j *FreeStyleJob) ToJobs(taskID int64) ([]*commonmodels.JobTask, error) {
 	return []*commonmodels.JobTask{jobTask}, nil
 }
 
-func stepsToStepTasks(step []*commonmodels.Step) []*commonmodels.StepTask {
+func stepsToStepTasks(step []*commonmodels.Step, outputs []*commonmodels.Output) []*commonmodels.StepTask {
 	logger := log.SugaredLogger()
 	resp := []*commonmodels.StepTask{}
 	for _, step := range step {
@@ -236,6 +242,16 @@ func stepsToStepTasks(step []*commonmodels.Step) []*commonmodels.StepTask {
 			}
 			stepTask.Spec = stepTaskSpec
 		}
+		if stepTask.StepType == config.StepShell {
+			stepTaskSpec := &steptypes.StepShellSpec{}
+			if err := commonmodels.IToi(stepTask.Spec, stepTaskSpec); err != nil {
+				continue
+			}
+			stepTaskSpec.Scripts = append(strings.Split(replaceWrapLine(stepTaskSpec.Script), "\n"), outputScript(outputs)...)
+			stepTask.Spec = stepTaskSpec
+
+		}
+
 		resp = append(resp, stepTask)
 	}
 	return resp
@@ -264,5 +280,21 @@ func getfreestyleJobVariables(steps []*commonmodels.StepTask, taskID int64, proj
 }
 
 func (j *FreeStyleJob) LintJob() error {
-	return nil
+	j.spec = &commonmodels.FreestyleJobSpec{}
+	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+		return err
+	}
+	return checkOutputNames(j.spec.Outputs)
+}
+
+func (j *FreeStyleJob) GetOutPuts(log *zap.SugaredLogger) []string {
+	resp := []string{}
+	j.spec = &commonmodels.FreestyleJobSpec{}
+	if err := commonmodels.IToiYaml(j.job.Spec, j.spec); err != nil {
+		return resp
+	}
+
+	jobKey := j.job.Name
+	resp = append(resp, getOutputKey(jobKey, j.spec.Outputs)...)
+	return resp
 }

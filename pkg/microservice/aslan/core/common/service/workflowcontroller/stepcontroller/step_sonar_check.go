@@ -21,7 +21,7 @@ import (
 	"fmt"
 
 	"go.uber.org/zap"
-	"gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v2"
 
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
 	"github.com/koderover/zadig/pkg/types/step"
@@ -29,7 +29,7 @@ import (
 
 type sonarCheckCtl struct {
 	step           *commonmodels.StepTask
-	tarArchiveSpec *step.StepSonarCheckSpec
+	sonarCheckSpec *step.StepSonarCheckSpec
 	log            *zap.SugaredLogger
 }
 
@@ -43,7 +43,7 @@ func NewSonarCheckCtl(stepTask *commonmodels.StepTask, log *zap.SugaredLogger) (
 		return nil, fmt.Errorf("unmarshal sonar check error: %v", err)
 	}
 	stepTask.Spec = sonarCheckSpec
-	return &sonarCheckCtl{tarArchiveSpec: sonarCheckSpec, log: log, step: stepTask}, nil
+	return &sonarCheckCtl{sonarCheckSpec: sonarCheckSpec, log: log, step: stepTask}, nil
 }
 
 func (s *sonarCheckCtl) PreRun(ctx context.Context) error {

@@ -44,15 +44,25 @@ func (*Router) Inject(router *gin.RouterGroup) {
 		helm.PUT("/services/releaseNaming", HelmReleaseNaming)
 	}
 
+	productionservices := router.Group("production/services")
+	{
+		productionservices.GET("", ListProductionServices)
+		productionservices.GET("/:name/k8s", GetProductionK8sService)
+		productionservices.POST("k8s", CreateK8sProductionService)
+		productionservices.PUT("/:name/k8s/variable", UpdateK8sProductionServiceVariables)
+		productionservices.DELETE("/:name", DeleteProductionService)
+	}
+
 	k8s := router.Group("services")
 	{
 		k8s.GET("", ListServiceTemplate)
 		k8s.GET("/:name/:type", GetServiceTemplate)
 		k8s.GET("/:name", GetServiceTemplateOption)
 		k8s.POST("", GetServiceTemplateProductName, CreateServiceTemplate)
+		k8s.PUT("/:name/variable", UpdateServiceVariable)
 		k8s.PUT("", UpdateServiceTemplate)
 		k8s.PUT("/yaml/validator", YamlValidator)
-		k8s.PUT("/:name/yaml/view", YamlViewServiceTemplate)
+		k8s.PUT("/:name/yaml/view", YamlViewServiceTemplate) // Deprecated
 		k8s.DELETE("/:name/:type", DeleteServiceTemplate)
 		k8s.GET("/:name/:type/ports", ListServicePort)
 		k8s.GET("/:name/environments/deployable", GetDeployableEnvs)

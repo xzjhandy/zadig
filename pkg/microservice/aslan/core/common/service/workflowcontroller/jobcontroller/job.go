@@ -19,6 +19,7 @@ package jobcontroller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,7 +31,7 @@ import (
 
 	"github.com/koderover/zadig/pkg/microservice/aslan/config"
 	commonmodels "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/models"
-	"github.com/koderover/zadig/pkg/setting"
+	commonrepo "github.com/koderover/zadig/pkg/microservice/aslan/core/common/repository/mongodb"
 	"github.com/koderover/zadig/pkg/util/rand"
 )
 
@@ -65,6 +66,18 @@ func initJobCtl(job *commonmodels.JobTask, workflowCtx *commonmodels.WorkflowTas
 		jobCtl = NewGrayRollbackJobCtl(job, workflowCtx, ack, logger)
 	case string(config.JobK8sPatch):
 		jobCtl = NewK8sPatchJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobIstioRelease):
+		jobCtl = NewIstioReleaseJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobIstioRollback):
+		jobCtl = NewIstioRollbackJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobJira):
+		jobCtl = NewJiraJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobNacos):
+		jobCtl = NewNacosJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobApollo):
+		jobCtl = NewApolloJobCtl(job, workflowCtx, ack, logger)
+	case string(config.JobMeegoTransition):
+		jobCtl = NewMeegoTransitionJobCtl(job, workflowCtx, ack, logger)
 	default:
 		jobCtl = NewFreestyleJobCtl(job, workflowCtx, ack, logger)
 	}
@@ -75,17 +88,26 @@ func runJob(ctx context.Context, job *commonmodels.JobTask, workflowCtx *commonm
 	// render global variables for every job.
 	workflowCtx.GlobalContextEach(func(k, v string) bool {
 		b, _ := json.Marshal(job)
-		replacedString := strings.ReplaceAll(string(b), fmt.Sprintf(setting.RenderValueTemplate, k), v)
-		json.Unmarshal([]byte(replacedString), &job)
+		v = strings.Trim(v, "\n")
+		replacedString := strings.ReplaceAll(string(b), k, v)
+		if err := json.Unmarshal([]byte(replacedString), &job); err != nil {
+			logger.Errorf("unmarshal job error: %v", err)
+		}
 		return true
 	})
-	job.Status = config.StatusRunning
+	job.Status = config.StatusPrepare
 	job.StartTime = time.Now().Unix()
 	job.K8sJobName = getJobName(workflowCtx.WorkflowName, workflowCtx.TaskID)
 	ack()
 
 	logger.Infof("start job: %s,status: %s", job.Name, job.Status)
 	defer func() {
+		if err := recover(); err != nil {
+			errMsg := fmt.Sprintf("job: %s panic: %v", job.Name, err)
+			logger.Error(errMsg)
+			job.Status = config.StatusFailed
+			job.Error = errMsg
+		}
 		job.EndTime = time.Now().Unix()
 		logger.Infof("finish job: %s,status: %s", job.Name, job.Status)
 		ack()
@@ -209,4 +231,55 @@ func logError(job *commonmodels.JobTask, msg string, logger *zap.SugaredLogger) 
 	logger.Error(msg)
 	job.Status = config.StatusFailed
 	job.Error = msg
+}
+
+// update product image info
+func updateProductImageByNs(namespace, productName, serviceName string, targets map[string]string, logger *zap.SugaredLogger) error {
+	opt := &commonrepo.ProductEnvFindOptions{
+		Name:      productName,
+		Namespace: namespace,
+	}
+
+	prod, err := commonrepo.NewProductColl().FindEnv(opt)
+
+	if err != nil {
+		logger.Errorf("find product namespace error: %v", err)
+		return err
+	}
+
+	for i, group := range prod.Services {
+		for j, service := range group {
+			if service.ServiceName == serviceName {
+				for l, container := range service.Containers {
+					if image, ok := targets[container.Name]; ok {
+						prod.Services[i][j].Containers[l].Image = image
+					}
+				}
+			}
+		}
+	}
+
+	if err := commonrepo.NewProductColl().Update(prod); err != nil {
+		errMsg := fmt.Sprintf("[%s][%s] update product image error: %v", prod.EnvName, prod.ProductName, err)
+		logger.Errorf(errMsg)
+		return errors.New(errMsg)
+	}
+
+	return nil
+}
+
+func getMatchedRegistries(image string, registries []*commonmodels.RegistryNamespace) []*commonmodels.RegistryNamespace {
+	resp := []*commonmodels.RegistryNamespace{}
+	for _, registry := range registries {
+		registryPrefix := registry.RegAddr
+		if len(registry.Namespace) > 0 {
+			registryPrefix = fmt.Sprintf("%s/%s", registry.RegAddr, registry.Namespace)
+		}
+		registryPrefix = strings.TrimPrefix(registryPrefix, "http://")
+		registryPrefix = strings.TrimPrefix(registryPrefix, "https://")
+		if strings.HasPrefix(image, registryPrefix) {
+			resp = append(resp, registry)
+		}
+	}
+	return resp
 }

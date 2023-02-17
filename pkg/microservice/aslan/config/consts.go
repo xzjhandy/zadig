@@ -18,6 +18,7 @@ package config
 
 import (
 	"regexp"
+	"time"
 
 	"github.com/koderover/zadig/pkg/setting"
 )
@@ -170,28 +171,49 @@ const (
 	StepHtmlReport        StepType = "html_report"
 	StepTarArchive        StepType = "tar_archive"
 	StepSonarCheck        StepType = "sonar_check"
+	StepDistributeImage   StepType = "distribute_image"
 )
 
 type JobType string
 
 const (
-	JobBuild               JobType = "build"
-	JobDeploy              JobType = "deploy"
-	JobZadigBuild          JobType = "zadig-build"
-	JobZadigTesting        JobType = "zadig-test"
-	JobZadigScanning       JobType = "zadig-scanning"
-	JobCustomDeploy        JobType = "custom-deploy"
-	JobZadigDeploy         JobType = "zadig-deploy"
-	JobZadigHelmDeploy     JobType = "zadig-helm-deploy"
-	JobFreestyle           JobType = "freestyle"
-	JobPlugin              JobType = "plugin"
-	JobK8sBlueGreenDeploy  JobType = "k8s-blue-green-deploy"
-	JobK8sBlueGreenRelease JobType = "k8s-blue-green-release"
-	JobK8sCanaryDeploy     JobType = "k8s-canary-deploy"
-	JobK8sCanaryRelease    JobType = "k8s-canary-release"
-	JobK8sGrayRelease      JobType = "k8s-gray-release"
-	JobK8sGrayRollback     JobType = "k8s-gray-rollback"
-	JobK8sPatch            JobType = "k8s-resource-patch"
+	JobBuild                JobType = "build"
+	JobDeploy               JobType = "deploy"
+	JobZadigBuild           JobType = "zadig-build"
+	JobZadigDistributeImage JobType = "zadig-distribute-image"
+	JobZadigTesting         JobType = "zadig-test"
+	JobZadigScanning        JobType = "zadig-scanning"
+	JobCustomDeploy         JobType = "custom-deploy"
+	JobZadigDeploy          JobType = "zadig-deploy"
+	JobZadigHelmDeploy      JobType = "zadig-helm-deploy"
+	JobFreestyle            JobType = "freestyle"
+	JobPlugin               JobType = "plugin"
+	JobK8sBlueGreenDeploy   JobType = "k8s-blue-green-deploy"
+	JobK8sBlueGreenRelease  JobType = "k8s-blue-green-release"
+	JobK8sCanaryDeploy      JobType = "k8s-canary-deploy"
+	JobK8sCanaryRelease     JobType = "k8s-canary-release"
+	JobK8sGrayRelease       JobType = "k8s-gray-release"
+	JobK8sGrayRollback      JobType = "k8s-gray-rollback"
+	JobK8sPatch             JobType = "k8s-resource-patch"
+	JobIstioRelease         JobType = "istio-release"
+	JobIstioRollback        JobType = "istio-rollback"
+	JobJira                 JobType = "jira"
+	JobNacos                JobType = "nacos"
+	JobApollo               JobType = "apollo"
+	JobMeegoTransition      JobType = "meego-transition"
+)
+
+const (
+	ZadigIstioCopySuffix     = "zadig-copy"
+	ZadigLastAppliedImage    = "last-applied-image"
+	ZadigLastAppliedReplicas = "last-applied-replicas"
+)
+
+type ApprovalType string
+
+const (
+	NativeApproval ApprovalType = "native"
+	LarkApproval   ApprovalType = "lark"
 )
 
 type ApproveOrReject string
@@ -344,3 +366,13 @@ const (
 	TestJobHTMLReportStepName    = "html-report-step"
 	TestJobArchiveResultStepName = "archive-result-step"
 )
+
+type JobRunPolicy string
+
+const (
+	DefaultRun    JobRunPolicy = ""                // default run this job
+	DefaultNotRun JobRunPolicy = "default_not_run" // default not run this job
+	ForceRun      JobRunPolicy = "force_run"       // force run this job
+)
+
+const DefaultDeleteDeploymentTimeout = 10 * time.Minute

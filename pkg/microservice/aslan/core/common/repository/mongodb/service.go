@@ -184,15 +184,6 @@ func (c *ServiceColl) ListMaxRevisionsByProduct(productName string) ([]*models.S
 	return c.listMaxRevisions(m, nil)
 }
 
-func (c *ServiceColl) ListMaxRevisionServicesByYamlTemplate(templateId string) ([]*models.Service, error) {
-	m := bson.M{
-		"template_id": templateId,
-		"status":      bson.M{"$ne": setting.ProductStatusDeleting},
-		"source":      setting.ServiceSourceTemplate,
-	}
-	return c.listMaxRevisions(m, nil)
-}
-
 func (c *ServiceColl) ListMaxRevisionServicesByChartTemplate(templateName string) ([]*models.Service, error) {
 	m := bson.M{
 		"create_from.template_name": templateName,
@@ -339,6 +330,54 @@ func (c *ServiceColl) Update(args *models.Service) error {
 	}
 	change := bson.M{"$set": changeMap}
 	_, err := c.UpdateOne(context.TODO(), query, change)
+	return err
+}
+
+func (c *ServiceColl) UpdateServiceVariables(args *models.Service) error {
+	if args == nil {
+		return errors.New("nil ServiceTmplObject")
+	}
+	args.ProductName = strings.TrimSpace(args.ProductName)
+	args.ServiceName = strings.TrimSpace(args.ServiceName)
+
+	query := bson.M{"product_name": args.ProductName, "service_name": args.ServiceName, "revision": args.Revision}
+	changeMap := bson.M{
+		"variable_yaml": args.VariableYaml,
+		"service_vars":  args.ServiceVars,
+	}
+	change := bson.M{"$set": changeMap}
+	_, err := c.UpdateOne(context.TODO(), query, change)
+	return err
+}
+
+func (c *ServiceColl) UpdateServiceContainers(args *models.Service) error {
+	if args == nil {
+		return errors.New("nil ServiceTmplObject")
+	}
+	args.ProductName = strings.TrimSpace(args.ProductName)
+	args.ServiceName = strings.TrimSpace(args.ServiceName)
+
+	query := bson.M{"product_name": args.ProductName, "service_name": args.ServiceName, "revision": args.Revision}
+	changeMap := bson.M{
+		"containers": args.Containers,
+	}
+	change := bson.M{"$set": changeMap}
+	_, err := c.UpdateOne(context.TODO(), query, change)
+	return err
+}
+
+func (c *ServiceColl) TransferServiceSource(productName, source, newSource, username string) error {
+	query := bson.M{"product_name": productName, "source": source}
+
+	changeMap := bson.M{
+		"create_by":     username,
+		"visibility":    setting.PrivateVisibility,
+		"source":        newSource,
+		"env_name":      "",
+		"workload_type": "",
+	}
+	change := bson.M{"$set": changeMap}
+	_, err := c.UpdateMany(context.TODO(), query, change)
 	return err
 }
 
@@ -657,13 +696,30 @@ func (c *ServiceColl) Count(productName string) (int, error) {
 	return cs[0].Count, nil
 }
 
-func (c *ServiceColl) GetTemplateReference(templateID string) ([]*models.Service, error) {
+func (c *ServiceColl) GetChartTemplateReference(templateName string) ([]*models.Service, error) {
 	query := bson.M{
-		"template_id": templateID,
-		"status":      bson.M{"$ne": setting.ProductStatusDeleting},
+		"status": bson.M{"$ne": setting.ProductStatusDeleting},
+		"source": setting.SourceFromChartTemplate,
 	}
 
-	return c.listMaxRevisions(query, nil)
+	postMatch := bson.M{
+		"create_from.template_name": templateName,
+	}
+
+	return c.listMaxRevisions(query, postMatch)
+}
+
+func (c *ServiceColl) GetYamlTemplateReference(templateID string) ([]*models.Service, error) {
+	query := bson.M{
+		"status": bson.M{"$ne": setting.ProductStatusDeleting},
+		"source": setting.ServiceSourceTemplate,
+	}
+
+	postMatch := bson.M{
+		"template_id": templateID,
+	}
+
+	return c.listMaxRevisions(query, postMatch)
 }
 
 func (c *ServiceColl) listMaxRevisions(preMatch, postMatch bson.M) ([]*models.Service, error) {
@@ -681,9 +737,11 @@ func (c *ServiceColl) listMaxRevisions(preMatch, postMatch bson.M) ([]*models.Se
 					{"product_name", "$product_name"},
 					{"service_name", "$service_name"},
 				},
-				"service_id": bson.M{"$last": "$_id"},
-				"visibility": bson.M{"$last": "$visibility"},
-				"build_name": bson.M{"$last": "$build_name"},
+				"service_id":  bson.M{"$last": "$_id"},
+				"visibility":  bson.M{"$last": "$visibility"},
+				"build_name":  bson.M{"$last": "$build_name"},
+				"template_id": bson.M{"$last": "$template_id"},
+				"create_from": bson.M{"$last": "$create_from"},
 			},
 		},
 	}

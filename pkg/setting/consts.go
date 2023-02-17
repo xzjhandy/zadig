@@ -90,13 +90,14 @@ const (
 	ReleaseImageTimeout = "RELEASE_IMAGE_TIMEOUT"
 
 	// reaper
-	Home          = "HOME"
-	PkgFile       = "PKG_FILE"
-	JobConfigFile = "JOB_CONFIG_FILE"
-	DockerAuthDir = "DOCKER_AUTH_DIR"
-	Path          = "PATH"
-	DockerHost    = "DOCKER_HOST"
-	BuildURL      = "BUILD_URL"
+	Home            = "HOME"
+	PkgFile         = "PKG_FILE"
+	JobConfigFile   = "JOB_CONFIG_FILE"
+	DockerAuthDir   = "DOCKER_AUTH_DIR"
+	Path            = "PATH"
+	DockerHost      = "DOCKER_HOST"
+	BuildURL        = "BUILD_URL"
+	DefaultDockSock = "/var/run/docker.sock"
 
 	// jenkins
 	JenkinsBuildImage = "JENKINS_BUILD_IMAGE"
@@ -155,6 +156,7 @@ const (
 	ProductLabel                    = "s-product"
 	GroupLabel                      = "s-group"
 	ServiceLabel                    = "s-service"
+	LabelHashKey                    = "hash"
 	ConfigBackupLabel               = "config-backup"
 	EnvNameLabel                    = "s-env"
 	UpdateBy                        = "update-by"
@@ -276,6 +278,10 @@ const (
 	ServiceSourceTemplate = "template"
 	SourceFromPM          = "pm"
 	SourceFromGitRepo     = "repo"
+	// SourceFromApollo is the configuration_management type of apollo
+	SourceFromApollo = "apollo"
+	// SourceFromNacos is the configuration_management type of nacos
+	SourceFromNacos = "nacos"
 
 	ProdENV = "prod"
 	TestENV = "test"
@@ -428,6 +434,8 @@ const (
 	TemplatesDir = "templates"
 	// ServiceTemplateCounterName 服务模板counter name
 	ServiceTemplateCounterName = "service:%s&project:%s"
+	// ServiceTemplateCounterName 服务模板counter name
+	ProductionServiceTemplateCounterName = "productionservice:%s&project:%s"
 	// GerritDefaultOwner
 	GerritDefaultOwner = "dafault"
 	// YamlFileSeperator ...
@@ -447,6 +455,12 @@ const (
 const (
 	// WebhookTaskCreator ...
 	WebhookTaskCreator = "webhook"
+	// JiraHookTaskCreator ...
+	JiraHookTaskCreator = "jira_hook"
+	// MeegoHookTaskCreator ...
+	MeegoHookTaskCreator = "meego_hook"
+	// GeneralHookTaskCreator ...
+	GeneralHookTaskCreator = "general_hook"
 	// CronTaskCreator ...
 	CronTaskCreator = "timer"
 	// DefaultTaskRevoker ...
@@ -554,9 +568,10 @@ const (
 	PathSearchComponentTag   = "tag"
 )
 
-// Aliyun specific stuff
+// host for multiple cloud provider
 const (
 	AliyunHost = ".aliyuncs.com"
+	AWSHost    = ".amazonaws.com"
 )
 
 // Dockerfile parsing consts
@@ -668,7 +683,8 @@ const (
 )
 
 const (
-	InformerNamingConvention = "%s-%s"
+	InformerNamingConvention      = "%s-%s"
+	IstioInformerNamingConvention = "%s-%s-istio"
 )
 
 type ResourceType string
@@ -711,4 +727,46 @@ const (
 	NormalSchedule    = "normal"
 	RequiredSchedule  = "required"
 	PreferredSchedule = "preferred"
+)
+
+const (
+	JobNameRegx  = "^[a-z][a-z0-9-]{0,31}$"
+	WorkflowRegx = "^[a-z0-9-]+$"
+)
+
+type WorkflowCategory string
+
+const (
+	CustomWorkflow  WorkflowCategory = ""
+	ReleaseWorkflow WorkflowCategory = "release"
+)
+
+const (
+	ServiceDeployStrategyImport = "import"
+	ServiceDeployStrategyDeploy = "deploy"
+)
+
+// Instant Message System types
+const (
+	IMLark     = "lark"
+	IMDingding = "dingding"
+)
+
+// lark app
+const (
+	LarkUserOpenID       = "open_id"
+	LarkDepartmentOpenID = "open_department_id"
+)
+
+// Project Management types
+const (
+	PMJira  = "jira"
+	PMLark  = "lark"
+	PMMeego = "meego"
+)
+
+// Workflow variable source type
+const (
+	VariableSourceRuntime = "runtime"
+	VariableSourceOther   = "other"
 )
